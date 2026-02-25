@@ -1,19 +1,5 @@
 name: "🛒 Demo — Cypress / Saucedemo"
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LIVE DEMO — This pipeline runs real E2E tests against saucedemo.com
-# It is self-contained: quality gate and reporting are inlined (no external uses:)
-# so it works as a standalone proof-of-concept without repo configuration.
-#
-# Tests covered:
-#    Auth    — valid login, locked user, empty fields, wrong password
-#    Catalog — 6 products, sort A-Z / Z-A / price, product detail
-#    Cart    — add, remove, badge count, persistence
-#    Checkout— form validation, order complete, price = subtotal + tax
-#
-# App under test: https://www.saucedemo.com (Sauce Labs official test site)
-# ─────────────────────────────────────────────────────────────────────────────
-
 on:
   push:
     branches: [main]
@@ -21,7 +7,7 @@ on:
       - "demo/**"
       - ".github/workflows/demo-cypress-saucedemo.yml"
   schedule:
-    - cron: "0 7 * * 1-5"   # Weekdays 07:00 UTC — keeps badges fresh
+    - cron: "0 7 * * 1-5"
   workflow_dispatch:
     inputs:
       browser:
@@ -40,9 +26,6 @@ env:
   BROWSER: ${{ inputs.browser || 'chrome' }}
   BASE_URL: "https://www.saucedemo.com"
 
-# ═════════════════════════════════════════════════════════════════════════════
-# LAYER 1 — SETUP
-# ═════════════════════════════════════════════════════════════════════════════
 jobs:
   setup:
     name: " Setup — Node 20 + Cypress"
@@ -98,9 +81,6 @@ jobs:
           echo "| Browser | ${{ steps.browser.outputs.value }} |" >> $GITHUB_STEP_SUMMARY
           echo "| Target | ${{ env.BASE_URL }} |" >> $GITHUB_STEP_SUMMARY
 
-# ═════════════════════════════════════════════════════════════════════════════
-# LAYER 2 — TEST (3 shards)
-# ═════════════════════════════════════════════════════════════════════════════
   test:
     name: " Tests — Shard ${{ matrix.shard }}/3 (${{ matrix.browser }})"
     runs-on: ubuntu-latest
@@ -132,17 +112,10 @@ jobs:
         run: npm ci
 
       - name: Run Cypress — Shard ${{ matrix.shard }}/3
+        id: cypress-run
         working-directory: demo
         continue-on-error: true
         run: |
-          # Shard spec assignment:
-          # Shard 1 → auth tests
-          # Shard 2 → catalog + cart tests  (two dirs passed as separate --spec flags)
-          # Shard 3 → checkout tests
-          #
-          # NOTE: Cypress 13 with globs requires separate --spec flags per pattern,
-          # not a comma-separated string. A single --spec with a comma only works
-          # for explicit file paths, not glob expressions.
           SHARD="${{ matrix.shard }}"
           if [ "$SHARD" = "1" ]; then
             SPEC_FLAGS="--spec cypress/e2e/auth/**/*.cy.js"
@@ -160,21 +133,49 @@ jobs:
         env:
           CYPRESS_BASE_URL: ${{ env.BASE_URL }}
 
-      - name: Debug — list mochawesome files
+      - name: Generate empty report if missing
         if: always()
         working-directory: demo
         run: |
-          echo "=== mochawesome-report contents ==="
-          ls -la mochawesome-report/ 2>/dev/null || echo "Directory does not exist"
-          echo "=== All JSON files in demo/ ==="
-          find . -name "*.json" | grep -i moch || echo "No mochawesome JSON found"
+          mkdir -p mochawesome-report
+          SHARD="${{ matrix.shard }}"
+          FILE="mochawesome-report/shard-${SHARD}.json"
+
+          # Check for timestamped variant too
+          FOUND=$(find mochawesome-report -name "shard-${SHARD}*.json" 2>/dev/null | head -1)
+
+          if [ -n "$FOUND" ]; then
+            echo "✅ Found: $FOUND"
+            # Normalize filename to shard-N.json
+            if [ "$FOUND" != "$FILE" ]; then
+              cp "$FOUND" "$FILE"
+              echo "Copied $FOUND → $FILE"
+            fi
+          else
+            echo "⚠️ No JSON found — creating empty report for shard $SHARD"
+            cat > "$FILE" << EOF
+          {
+            "stats": {
+              "tests": 0,
+              "passes": 0,
+              "failures": 1,
+              "pending": 0,
+              "duration": 0
+            },
+            "results": []
+          }
+          EOF
+          fi
+
+          echo "=== Final mochawesome-report contents ==="
+          ls -la mochawesome-report/
 
       - name: Upload Mochawesome JSON
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: mochawesome-shard${{ matrix.shard }}
-          path: demo/mochawesome-report/shard-${{ matrix.shard }}*.json
+          path: demo/mochawesome-report/shard-${{ matrix.shard }}.json
           retention-days: 7
 
       - name: Upload screenshots on failure
@@ -193,9 +194,6 @@ jobs:
           path: demo/cypress/videos
           retention-days: 7
 
-# ═════════════════════════════════════════════════════════════════════════════
-# LAYER 3 — REPORT: merge shards → metrics
-# ═════════════════════════════════════════════════════════════════════════════
   report:
     name: "📊 Report — Merge & Metrics"
     runs-on: ubuntu-latest
@@ -221,7 +219,10 @@ jobs:
           import json, glob, os
 
           total = passed = failed = pending = 0
-          for f in glob.glob('mochawesome-report/*.json'):
+          files = glob.glob('mochawesome-report/*.json')
+          print(f"Found {len(files)} JSON files: {files}")
+
+          for f in files:
               try:
                   d = json.load(open(f))
                   s = d.get('stats', {})
@@ -229,6 +230,7 @@ jobs:
                   passed  += s.get('passes',   0)
                   failed  += s.get('failures', 0)
                   pending += s.get('pending',  0)
+                  print(f"  {f}: tests={s.get('tests',0)} passes={s.get('passes',0)} failures={s.get('failures',0)}")
               except Exception as e:
                   print(f"Warning: could not parse {f}: {e}")
 
@@ -274,9 +276,6 @@ jobs:
           echo "| 🌐 Browser | ${{ needs.setup.outputs.browser }} |" >> $GITHUB_STEP_SUMMARY
           echo "| 🌍 Target | ${{ env.BASE_URL }} |" >> $GITHUB_STEP_SUMMARY
 
-# ═════════════════════════════════════════════════════════════════════════════
-# LAYER 4 — QUALITY GATE (inlined — no external uses:)
-# ═════════════════════════════════════════════════════════════════════════════
   quality-gate:
     name: "🚦 Quality Gate"
     runs-on: ubuntu-latest
@@ -343,9 +342,6 @@ jobs:
               print("\n✅ GATE PASSED — all thresholds met")
           PYEOF
 
-# ═════════════════════════════════════════════════════════════════════════════
-# LAYER 5 — NOTIFY (Slack — optional, triggered only if notify-slack=true)
-# ═════════════════════════════════════════════════════════════════════════════
   notify:
     name: "📣 Notify"
     runs-on: ubuntu-latest
