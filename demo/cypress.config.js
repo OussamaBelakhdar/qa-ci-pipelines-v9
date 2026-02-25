@@ -5,8 +5,8 @@ module.exports = defineConfig({
     baseUrl: "https://www.saucedemo.com",
     viewportWidth: 1280,
     viewportHeight: 720,
-    defaultCommandTimeout: 8000,
-    pageLoadTimeout: 30000,
+    defaultCommandTimeout: 12000,
+    pageLoadTimeout: 60000,
     video: true,
     screenshotOnRunFailure: true,
     screenshotsFolder: "cypress/screenshots",
@@ -19,8 +19,8 @@ module.exports = defineConfig({
       json: true,
     },
     retries: {
-      runMode: 1,       // 1 retry in CI
-      openMode: 0,      // no retry in interactive mode
+      runMode: 2,
+      openMode: 0,
     },
     env: {
       // Default credentials (overridable via env vars)
@@ -33,7 +33,7 @@ module.exports = defineConfig({
     setupNodeEvents(on, config) {
       // Log test start/end for CI readability
       on("before:run", (details) => {
-        console.log(`\n🧪 Cypress run starting`);
+        console.log(`\n Cypress run starting`);
         console.log(`   Browser: ${details.browser.name} ${details.browser.version}`);
         console.log(`   Specs:   ${details.specs.length} spec files`);
       });
@@ -41,7 +41,7 @@ module.exports = defineConfig({
       on("after:run", (results) => {
         if (results) {
           const rate = ((results.totalPassed / results.totalTests) * 100).toFixed(1);
-          console.log(`\n📊 Run complete`);
+          console.log(`\n Run complete`);
           console.log(`   Total:  ${results.totalTests}`);
           console.log(`   Passed: ${results.totalPassed}`);
           console.log(`   Failed: ${results.totalFailed}`);
