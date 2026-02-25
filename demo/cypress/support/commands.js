@@ -23,7 +23,9 @@ Cypress.Commands.add("login", (username, password) => {
     },
     {
       validate() {
-        cy.url().should("include", "/inventory");
+        // Check the session cookie without navigating — avoids false
+        // failure when beforeEach has already visited the login page.
+        cy.getCookie("session-username").should("exist");
       },
       cacheAcrossSpecs: true,
     }
