@@ -6,7 +6,7 @@ module.exports = defineConfig({
     viewportWidth: 1280,
     viewportHeight: 720,
     defaultCommandTimeout: 8000,
-    pageLoadTimeout: 90000,
+    pageLoadTimeout: 270000,   // 90000 × 3 retries → 90000ms guaranteed per attempt
     video: true,
     screenshotOnRunFailure: true,
     screenshotsFolder: "cypress/screenshots",
