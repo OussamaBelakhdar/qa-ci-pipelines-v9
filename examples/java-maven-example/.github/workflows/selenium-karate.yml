@@ -172,4 +172,4 @@ jobs:
     with:
       min-pass-rate: "95"
       max-flaky-count: "3"
-      block-on-failure: "true"
+      block-on-failure: true
