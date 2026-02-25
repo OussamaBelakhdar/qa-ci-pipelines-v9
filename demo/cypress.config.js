@@ -1,6 +1,18 @@
 const { defineConfig } = require("cypress");
 
 module.exports = defineConfig({
+  // Reporter config at top level so it works with any browser (Chrome, Firefox, Edge).
+  // CLI --reporter flag is NOT used — it is unreliable with non-Electron browsers in Cypress 13.
+  reporter: "mochawesome",
+  reporterOptions: {
+    reportDir: "mochawesome-report",
+    overwrite: false,
+    html: false,
+    json: true,
+    // Filename is set per-shard via CYPRESS_SHARD_FILENAME env var injected by the workflow.
+    reportFilename: process.env.CYPRESS_SHARD_FILENAME || "results",
+  },
+
   e2e: {
     baseUrl: "https://www.saucedemo.com",
     viewportWidth: 1280,

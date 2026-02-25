@@ -153,11 +153,10 @@ jobs:
 
           npx cypress run \
             --browser ${{ matrix.browser }} \
-            $SPEC_FLAGS \
-            --reporter mochawesome \
-            --reporter-options "reportDir=mochawesome-report,overwrite=false,html=false,json=true,reportFilename=shard-${{ matrix.shard }}"
+            $SPEC_FLAGS
         env:
           CYPRESS_BASE_URL: ${{ env.BASE_URL }}
+          CYPRESS_SHARD_FILENAME: shard-${{ matrix.shard }}
 
       - name: Upload Mochawesome JSON
         if: always()
