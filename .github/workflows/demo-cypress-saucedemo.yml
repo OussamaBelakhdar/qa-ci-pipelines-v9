@@ -160,12 +160,21 @@ jobs:
         env:
           CYPRESS_BASE_URL: ${{ env.BASE_URL }}
 
+      - name: Debug — list mochawesome files
+        if: always()
+        working-directory: demo
+        run: |
+          echo "=== mochawesome-report contents ==="
+          ls -la mochawesome-report/ 2>/dev/null || echo "Directory does not exist"
+          echo "=== All JSON files in demo/ ==="
+          find . -name "*.json" | grep -i moch || echo "No mochawesome JSON found"
+
       - name: Upload Mochawesome JSON
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: mochawesome-shard${{ matrix.shard }}
-          path: demo/mochawesome-report/shard-${{ matrix.shard }}.json
+          path: demo/mochawesome-report/shard-${{ matrix.shard }}*.json
           retention-days: 7
 
       - name: Upload screenshots on failure
