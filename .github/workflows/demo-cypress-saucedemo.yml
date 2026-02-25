@@ -154,7 +154,6 @@ jobs:
           npx cypress run \
             --browser ${{ matrix.browser }} \
             $SPEC_FLAGS \
-            --config pageLoadTimeout=90000 \
             --reporter mochawesome \
             --reporter-options "reportDir=mochawesome-report,overwrite=false,html=false,json=true,reportFilename=shard-${{ matrix.shard }}"
         env:
@@ -199,12 +198,29 @@ jobs:
       passed:    ${{ steps.metrics.outputs.passed }}
       failed:    ${{ steps.metrics.outputs.failed }}
     steps:
-      - name: Download all Mochawesome shards
+      - name: Download mochawesome-shard1
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
-          pattern: mochawesome-shard*
-          merge-multiple: true
+          name: mochawesome-shard1
           path: mochawesome-report
+
+      - name: Download mochawesome-shard2
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: mochawesome-shard2
+          path: mochawesome-report
+
+      - name: Download mochawesome-shard3
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: mochawesome-shard3
+          path: mochawesome-report
+
+      - name: Debug — list downloaded report files
+        run: find mochawesome-report -type f 2>/dev/null || echo "⚠️ mochawesome-report is empty or missing"
 
       - name: Parse metrics from Mochawesome JSON
         id: metrics
