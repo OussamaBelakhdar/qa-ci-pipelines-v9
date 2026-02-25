@@ -4,7 +4,6 @@
 describe("Shopping Cart", () => {
   beforeEach(() => {
     cy.login();
-    cy.visit("/inventory.html");
   });
 
   context("Add to cart", () => {

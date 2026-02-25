@@ -4,7 +4,6 @@
 describe("Checkout Flow", () => {
   beforeEach(() => {
     cy.login();
-    cy.visit("/inventory.html");
     cy.addToCart("Sauce Labs Backpack");
     cy.addToCart("Sauce Labs Bike Light");
   });

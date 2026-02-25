@@ -4,7 +4,6 @@
 describe("Product Catalog", () => {
   beforeEach(() => {
     cy.login();
-    cy.visit("/inventory.html");
   });
 
   context("Product listing", () => {

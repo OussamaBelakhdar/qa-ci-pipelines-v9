@@ -24,7 +24,6 @@ describe("Authentication — Login", () => {
 
     it("preserves session across page reloads", () => {
       cy.login();
-      cy.visit("/inventory.html"); // cy.login() ends at /inventory.html; explicit visit ensures clean state
       cy.reload();
       cy.url().should("include", "/inventory.html");
       cy.get(".title").should("have.text", "Products");
@@ -32,7 +31,6 @@ describe("Authentication — Login", () => {
 
     it("shows the correct username in the burger menu", () => {
       cy.login();
-      cy.visit("/inventory.html"); // cy.login() ends at /inventory.html; explicit visit ensures clean state
       cy.get("#react-burger-menu-btn").click();
       cy.get(".bm-menu").should("be.visible");
     });
