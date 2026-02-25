@@ -105,8 +105,8 @@ jobs:
     name: "🧪 Tests — Shard ${{ matrix.shard }}/3 (${{ matrix.browser }})"
     runs-on: ubuntu-latest
     needs: setup
-    fail-fast: false
     strategy:
+      fail-fast: false
       matrix:
         browser: ["${{ needs.setup.outputs.browser }}"]
         shard: [1, 2, 3]
