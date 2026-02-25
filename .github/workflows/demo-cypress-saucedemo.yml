@@ -167,6 +167,7 @@ jobs:
           name: mochawesome-shard${{ matrix.shard }}
           path: demo/mochawesome-report/shard-${{ matrix.shard }}.json
           retention-days: 7
+          if-no-files-found: warn  # Cypress may not write the report if it crashes hard
 
       - name: Upload screenshots on failure
         if: failure()

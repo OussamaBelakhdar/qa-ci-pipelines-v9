@@ -11,13 +11,6 @@ module.exports = defineConfig({
     screenshotOnRunFailure: true,
     screenshotsFolder: "cypress/screenshots",
     videosFolder: "cypress/videos",
-    reporter: "mochawesome",
-    reporterOptions: {
-      reportDir: "mochawesome-report",
-      overwrite: false,
-      html: false,
-      json: true,
-    },
     retries: {
       runMode: 2,       // 2 retries in CI (external site can be flaky)
       openMode: 0,      // no retry in interactive mode

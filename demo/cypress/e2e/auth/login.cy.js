@@ -22,6 +22,7 @@ describe("Authentication — Login", () => {
 
     it("preserves session across page reloads", () => {
       cy.login();
+      cy.visit("/inventory.html"); // cy.session() leaves browser on about:blank — navigate first
       cy.reload();
       cy.url().should("include", "/inventory.html");
       cy.get(".title").should("have.text", "Products");
