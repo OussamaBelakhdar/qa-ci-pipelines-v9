@@ -23,7 +23,8 @@ jobs:
           python-version: "3.11"
       - run: pip install yamllint
       - name: Validate templates
-        run: yamllint -d "{extends: relaxed, rules: {line-length: {max: 200}}}" templates/
+        run: |
+          yamllint -d "{extends: relaxed, rules: {line-length: {max: 200}}}" templates/
       - name: Validate examples
         run: find examples/ -name "*.yml" -exec yamllint -d relaxed {} +
 
