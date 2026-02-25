@@ -48,7 +48,7 @@ Cypress.Commands.add("removeFromCart", (productName) => {
  * @example cy.checkout({ firstName: 'John', lastName: 'Doe', zip: '12345' })
  */
 Cypress.Commands.add("checkout", ({ firstName, lastName, zip } = {}) => {
-  cy.get('[data-test="shopping-cart-link"]').click();
+  cy.get(".shopping_cart_link").click();
   cy.get('[data-test="checkout"]').click();
   cy.get('[data-test="firstName"]').type(firstName || "John");
   cy.get('[data-test="lastName"]').type(lastName || "Doe");
