@@ -12,24 +12,13 @@ Cypress.Commands.add("login", (username, password) => {
   const user = username || Cypress.env("STANDARD_USER") || "standard_user";
   const pass = password || Cypress.env("PASSWORD") || "secret_sauce";
 
-  cy.session(
-    [user, pass],
-    () => {
-      cy.visit("/");
-      cy.get('[data-test="username"]').type(user);
-      cy.get('[data-test="password"]').type(pass);
-      cy.get('[data-test="login-button"]').click();
-      cy.url().should("include", "/inventory.html");
-    },
-    {
-      validate() {
-        // Check the session cookie without navigating — avoids false
-        // failure when beforeEach has already visited the login page.
-        cy.getCookie("session-username").should("exist");
-      },
-      cacheAcrossSpecs: true,
-    }
-  );
+  cy.session([user, pass], () => {
+    cy.visit("/");
+    cy.get('[data-test="username"]').type(user);
+    cy.get('[data-test="password"]').type(pass);
+    cy.get('[data-test="login-button"]').click();
+    cy.url().should("include", "/inventory.html");
+  });
 });
 
 /**
