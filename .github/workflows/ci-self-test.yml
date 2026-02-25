@@ -15,11 +15,11 @@ name: "Internal — Self-Test Quality Gate"
 on:
   push:
     paths:
-      - ".github/workflows/shared/quality-gate.yml"
+      - ".github/workflows/quality-gate.yml"
       - ".github/workflows/ci-self-test.yml"
   pull_request:
     paths:
-      - ".github/workflows/shared/quality-gate.yml"
+      - ".github/workflows/quality-gate.yml"
   workflow_dispatch:
 
 jobs:
@@ -102,7 +102,7 @@ jobs:
   test-gate-pass:
     name: "✅ Gate should PASS (100% pass rate)"
     needs: prepare-fixtures
-    uses: ./.github/workflows/shared/quality-gate.yml
+    uses: ./.github/workflows/quality-gate.yml
     with:
       min-pass-rate: "95"
       max-flaky-count: "5"
@@ -113,7 +113,7 @@ jobs:
   test-gate-fail-rate:
     name: "❌ Gate should FAIL (80% < 95% threshold)"
     needs: prepare-fixtures
-    uses: ./.github/workflows/shared/quality-gate.yml
+    uses: ./.github/workflows/quality-gate.yml
     with:
       min-pass-rate: "95"
       max-flaky-count: "5"
@@ -124,7 +124,7 @@ jobs:
   test-gate-fail-flaky:
     name: "❌ Gate should FAIL (10 flaky > 5 threshold)"
     needs: prepare-fixtures
-    uses: ./.github/workflows/shared/quality-gate.yml
+    uses: ./.github/workflows/quality-gate.yml
     with:
       min-pass-rate: "95"
       max-flaky-count: "5"
@@ -135,7 +135,7 @@ jobs:
   test-gate-malformed:
     name: "⚠️ Gate should handle malformed input"
     needs: prepare-fixtures
-    uses: ./.github/workflows/shared/quality-gate.yml
+    uses: ./.github/workflows/quality-gate.yml
     with:
       min-pass-rate: "95"
       max-flaky-count: "5"
