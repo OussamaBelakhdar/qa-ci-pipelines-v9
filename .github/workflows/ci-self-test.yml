@@ -106,7 +106,7 @@ jobs:
     with:
       min-pass-rate: "95"
       max-flaky-count: "5"
-      block-on-failure: "true"
+      block-on-failure: true
       metrics-artifact: "qa-metrics-pass"
 
   # ── Test 2: gate should FAIL with low pass rate ────────────────────────────
@@ -117,7 +117,7 @@ jobs:
     with:
       min-pass-rate: "95"
       max-flaky-count: "5"
-      block-on-failure: "true"
+      block-on-failure: true
       metrics-artifact: "qa-metrics-fail-rate"
 
   # ── Test 3: gate should FAIL with too many flaky tests ─────────────────────
@@ -128,7 +128,7 @@ jobs:
     with:
       min-pass-rate: "95"
       max-flaky-count: "5"
-      block-on-failure: "true"
+      block-on-failure: true
       metrics-artifact: "qa-metrics-fail-flaky"
 
   # ── Test 4: gate should exit cleanly on malformed input ────────────────────
@@ -139,7 +139,7 @@ jobs:
     with:
       min-pass-rate: "95"
       max-flaky-count: "5"
-      block-on-failure: "true"
+      block-on-failure: true
       metrics-artifact: "qa-metrics-malformed"
 
   # ── Verify: assert expected outcomes ──────────────────────────────────────

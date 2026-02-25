@@ -68,7 +68,7 @@ env:
 
 jobs:
   # LAYER 1 — TEST
-  k6-test:
+  test:
     name: "k6 — ${{ inputs.scenario || 'smoke' }} / ${{ inputs.vus || '50' }}vus"
     runs-on: ubuntu-latest
     steps:
@@ -121,7 +121,7 @@ jobs:
   report:
     name: "Report — Metrics"
     runs-on: ubuntu-latest
-    needs: k6-test
+    needs: test
     if: always()
     outputs:
       pass-rate: ${{ steps.metrics.outputs.pass_rate }}
@@ -213,7 +213,7 @@ jobs:
       max-error-rate: ${{ inputs.max-error-rate || '5' }}
       max-p95-ms: ${{ inputs.max-p95-ms || '2000' }}
       max-flaky-count: "999"
-      block-on-failure: "true"
+      block-on-failure: true
       metrics-artifact: "qa-metrics"
 
   # LAYER 4 — NOTIFICATION

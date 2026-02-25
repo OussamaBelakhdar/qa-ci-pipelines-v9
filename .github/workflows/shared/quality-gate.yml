@@ -58,10 +58,10 @@ on:
         type: string
       # ── Behavior ─────────────────────────────────────────────────────────────
       block-on-failure:
-        description: "Exit with error code if any threshold is exceeded (true/false)"
+        description: "Exit with error code if any threshold is exceeded"
         required: false
-        default: "true"
-        type: string
+        default: true
+        type: boolean
       metrics-artifact:
         description: "Name of the artifact containing metrics.json"
         required: false
