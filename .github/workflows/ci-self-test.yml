@@ -1,0 +1,219 @@
+name: "Internal — Self-Test Quality Gate"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# This workflow tests the quality-gate shared module itself.
+# It validates that the gate:
+#   ✅ PASSES when all thresholds are met
+#   ✅ FAILS  when pass rate is below threshold
+#   ✅ FAILS  when flaky count exceeds threshold
+#   ✅ HANDLES malformed metrics.json gracefully (exit 1, not crash)
+#
+# This is the test of the tester. Without it, the quality-gate module
+# is trusted but not verified.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    paths:
+      - ".github/workflows/shared/quality-gate.yml"
+      - ".github/workflows/ci-self-test.yml"
+  pull_request:
+    paths:
+      - ".github/workflows/shared/quality-gate.yml"
+  workflow_dispatch:
+
+jobs:
+  # ── Fixture generator — produces known metrics.json files ──────────────────
+  prepare-fixtures:
+    name: "🔧 Prepare Test Fixtures"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create fixture — 100% pass (should PASS gate)
+        run: |
+          mkdir -p fixtures/pass fixtures/fail-rate fixtures/fail-flaky fixtures/malformed
+
+          cat > fixtures/pass/metrics.json << 'JSON'
+          {
+            "tool": "self-test",
+            "total": 100,
+            "passed": 100,
+            "failed": 0,
+            "skipped": 0,
+            "flaky_count": 0,
+            "pass_rate": 100.0
+          }
+          JSON
+
+          cat > fixtures/fail-rate/metrics.json << 'JSON'
+          {
+            "tool": "self-test",
+            "total": 100,
+            "passed": 80,
+            "failed": 20,
+            "skipped": 0,
+            "flaky_count": 0,
+            "pass_rate": 80.0
+          }
+          JSON
+
+          cat > fixtures/fail-flaky/metrics.json << 'JSON'
+          {
+            "tool": "self-test",
+            "total": 100,
+            "passed": 98,
+            "failed": 2,
+            "skipped": 0,
+            "flaky_count": 10,
+            "pass_rate": 98.0
+          }
+          JSON
+
+          # Malformed — missing required fields
+          echo '{"tool": "self-test", "total": "not-a-number"}' > fixtures/malformed/metrics.json
+
+          echo "Fixtures created:"
+          find fixtures -name "*.json" -exec echo "  {}" \;
+
+      - name: Upload fixture — pass
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-metrics-pass
+          path: fixtures/pass/metrics.json
+
+      - name: Upload fixture — fail-rate
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-metrics-fail-rate
+          path: fixtures/fail-rate/metrics.json
+
+      - name: Upload fixture — fail-flaky
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-metrics-fail-flaky
+          path: fixtures/fail-flaky/metrics.json
+
+      - name: Upload fixture — malformed
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-metrics-malformed
+          path: fixtures/malformed/metrics.json
+
+  # ── Test 1: gate should PASS with perfect metrics ──────────────────────────
+  test-gate-pass:
+    name: "✅ Gate should PASS (100% pass rate)"
+    runs-on: ubuntu-latest
+    needs: prepare-fixtures
+    uses: ./.github/workflows/shared/quality-gate.yml
+    with:
+      min-pass-rate: "95"
+      max-flaky-count: "5"
+      block-on-failure: "true"
+      metrics-artifact: "qa-metrics-pass"
+
+  # ── Test 2: gate should FAIL with low pass rate ────────────────────────────
+  test-gate-fail-rate:
+    name: "❌ Gate should FAIL (80% < 95% threshold)"
+    runs-on: ubuntu-latest
+    needs: prepare-fixtures
+    continue-on-error: true   # expected to fail — we verify below
+    uses: ./.github/workflows/shared/quality-gate.yml
+    with:
+      min-pass-rate: "95"
+      max-flaky-count: "5"
+      block-on-failure: "true"
+      metrics-artifact: "qa-metrics-fail-rate"
+
+  # ── Test 3: gate should FAIL with too many flaky tests ─────────────────────
+  test-gate-fail-flaky:
+    name: "❌ Gate should FAIL (10 flaky > 5 threshold)"
+    runs-on: ubuntu-latest
+    needs: prepare-fixtures
+    continue-on-error: true   # expected to fail — we verify below
+    uses: ./.github/workflows/shared/quality-gate.yml
+    with:
+      min-pass-rate: "95"
+      max-flaky-count: "5"
+      block-on-failure: "true"
+      metrics-artifact: "qa-metrics-fail-flaky"
+
+  # ── Test 4: gate should exit cleanly on malformed input ────────────────────
+  test-gate-malformed:
+    name: "⚠️ Gate should handle malformed input"
+    runs-on: ubuntu-latest
+    needs: prepare-fixtures
+    continue-on-error: true   # expected to fail — we verify below
+    uses: ./.github/workflows/shared/quality-gate.yml
+    with:
+      min-pass-rate: "95"
+      max-flaky-count: "5"
+      block-on-failure: "true"
+      metrics-artifact: "qa-metrics-malformed"
+
+  # ── Verify: assert expected outcomes ──────────────────────────────────────
+  verify-outcomes:
+    name: "🔍 Verify Expected Outcomes"
+    runs-on: ubuntu-latest
+    needs:
+      - test-gate-pass
+      - test-gate-fail-rate
+      - test-gate-fail-flaky
+      - test-gate-malformed
+    if: always()
+    steps:
+      - name: Assert gate outcomes
+        run: |
+          python3 << 'PYEOF'
+          import sys
+
+          results = {
+              "gate-pass (100%)":       "${{ needs.test-gate-pass.result }}",
+              "gate-fail-rate (80%)":   "${{ needs.test-gate-fail-rate.result }}",
+              "gate-fail-flaky (10)":   "${{ needs.test-gate-fail-flaky.result }}",
+              "gate-malformed":         "${{ needs.test-gate-malformed.result }}",
+          }
+
+          expected = {
+              "gate-pass (100%)":       "success",
+              "gate-fail-rate (80%)":   "failure",
+              "gate-fail-flaky (10)":   "failure",
+              "gate-malformed":         "failure",
+          }
+
+          violations = []
+          print(f"\n{'='*55}")
+          print(f"  QUALITY GATE SELF-TEST — Results")
+          print(f"{'='*55}")
+          for test, result in results.items():
+              exp = expected[test]
+              ok = result == exp
+              icon = "✅" if ok else "❌"
+              print(f"  {icon} {test}: got={result} expected={exp}")
+              if not ok:
+                  violations.append(f"{test}: expected {exp}, got {result}")
+          print(f"{'='*55}\n")
+
+          if violations:
+              print(f"❌ SELF-TEST FAILED: {len(violations)} assertion(s) wrong")
+              for v in violations:
+                  print(f"   • {v}")
+              sys.exit(1)
+          else:
+              print("✅ SELF-TEST PASSED — quality-gate behaves as expected")
+          PYEOF
+
+      - name: Write summary
+        if: always()
+        run: |
+          PASS="${{ needs.test-gate-pass.result }}"
+          FAIL_RATE="${{ needs.test-gate-fail-rate.result }}"
+          FAIL_FLAKY="${{ needs.test-gate-fail-flaky.result }}"
+          MALFORMED="${{ needs.test-gate-malformed.result }}"
+
+          echo "## 🧪 Quality Gate Self-Test" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Scenario | Expected | Got | ✅/❌ |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|----------|-----|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| 100% pass rate | success | $PASS | $([ "$PASS" = "success" ] && echo ✅ || echo ❌) |" >> $GITHUB_STEP_SUMMARY
+          echo "| 80% pass rate (below 95%) | failure | $FAIL_RATE | $([ "$FAIL_RATE" = "failure" ] && echo ✅ || echo ❌) |" >> $GITHUB_STEP_SUMMARY
+          echo "| 10 flaky tests (above 5) | failure | $FAIL_FLAKY | $([ "$FAIL_FLAKY" = "failure" ] && echo ✅ || echo ❌) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Malformed metrics.json | failure | $MALFORMED | $([ "$MALFORMED" = "failure" ] && echo ✅ || echo ❌) |" >> $GITHUB_STEP_SUMMARY

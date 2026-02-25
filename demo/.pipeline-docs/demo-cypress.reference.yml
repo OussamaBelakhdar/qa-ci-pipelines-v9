@@ -1,0 +1,225 @@
+name: "Demo — Cypress / Saucedemo"
+
+# Live demonstration of templates/ui-web/cypress.yml
+# running real E2E tests against https://www.saucedemo.com
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "demo/**"
+      - "templates/ui-web/cypress.yml"
+      - "templates/shared/**"
+  pull_request:
+    paths:
+      - "demo/**"
+  schedule:
+    - cron: "0 7 * * 1-5"   # Weekdays at 7:00 AM UTC
+  workflow_dispatch:
+    inputs:
+      browser:
+        description: "Browser"
+        required: false
+        default: "chrome"
+        type: choice
+        options: ["chrome", "firefox", "edge"]
+      notify-slack:
+        description: "Send Slack notification"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+defaults:
+  run:
+    working-directory: demo
+
+env:
+  NODE_VERSION: "20"
+  BROWSER: ${{ inputs.browser || 'chrome' }}
+
+jobs:
+  # ── SETUP ───────────────────────────────────────────────────────────────────
+  setup:
+    name: "Setup — Node 20 + Cypress"
+    runs-on: ubuntu-latest
+    outputs:
+      cache-key: ${{ steps.cache-key.outputs.key }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: cache-key
+        run: |
+          echo "key=cypress-demo-${{ runner.os }}-node20-${{ hashFiles('demo/package-lock.json') }}" >> $GITHUB_OUTPUT
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: demo/package-lock.json
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/Cypress
+          key: ${{ steps.cache-key.outputs.key }}
+
+      - run: npm ci
+      - run: npx cypress verify
+
+  # ── TEST (3 shards) ──────────────────────────────────────────────────────────
+  test:
+    name: "Tests — ${{ matrix.shard }}/3 (${{ matrix.browser }})"
+    runs-on: ubuntu-latest
+    needs: setup
+    fail-fast: false
+    strategy:
+      matrix:
+        browser: ["${{ env.BROWSER }}"]
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: demo/package-lock.json
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/Cypress
+          key: ${{ needs.setup.outputs.cache-key }}
+
+      - run: npm ci
+
+      - name: Run Cypress — Shard ${{ matrix.shard }}
+        run: |
+          npx cypress run \
+            --browser ${{ matrix.browser }} \
+            --reporter mochawesome \
+            --reporter-options "reportDir=mochawesome-report,overwrite=false,html=false,json=true" \
+            --env grepTags=@shard${{ matrix.shard }}
+        env:
+          CYPRESS_BASE_URL: "https://www.saucedemo.com"
+
+      - name: Upload Mochawesome JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mochawesome-shard${{ matrix.shard }}
+          path: demo/mochawesome-report/*.json
+          retention-days: 3
+
+      - name: Upload screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ matrix.browser }}-shard${{ matrix.shard }}
+          path: demo/cypress/screenshots
+          retention-days: 7
+
+  # ── REPORT + METRICS ─────────────────────────────────────────────────────────
+  report:
+    name: "Report — Merge & Metrics"
+    runs-on: ubuntu-latest
+    needs: test
+    if: always()
+    outputs:
+      pass-rate: ${{ steps.metrics.outputs.pass_rate }}
+      total: ${{ steps.metrics.outputs.total }}
+      failed: ${{ steps.metrics.outputs.failed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mochawesome-shard*
+          merge-multiple: true
+          path: mochawesome-report
+
+      - name: Parse metrics
+        id: metrics
+        run: |
+          python3 << 'PYEOF'
+          import json, glob, os
+
+          total=passed=failed=pending=0
+          for f in glob.glob('mochawesome-report/*.json'):
+              try:
+                  d = json.load(open(f))
+                  s = d.get('stats', {})
+                  total   += s.get('tests', 0)
+                  passed  += s.get('passes', 0)
+                  failed  += s.get('failures', 0)
+                  pending += s.get('pending', 0)
+              except: pass
+
+          rate = round(passed/total*100, 2) if total > 0 else 0.0
+          os.makedirs("qa-metrics", exist_ok=True)
+          with open("qa-metrics/metrics.json", "w") as f:
+              json.dump({"tool":"cypress","total":total,"passed":passed,
+                         "failed":failed,"skipped":pending,"flaky_count":0,
+                         "pass_rate":rate}, f, indent=2)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"pass_rate={rate}\nfailed={failed}\ntotal={total}\n")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+              icon = "✅" if failed == 0 else "❌"
+              s.write(f"## {icon} Cypress — Saucedemo Results\n\n")
+              s.write(f"| Metric | Value |\n|--------|-------|\n")
+              s.write(f"| Total | {total} |\n")
+              s.write(f"| ✅ Passed | {passed} |\n")
+              s.write(f"| ❌ Failed | {failed} |\n")
+              s.write(f"| Pass rate | **{rate}%** |\n")
+          PYEOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qa-metrics
+          path: qa-metrics/metrics.json
+          retention-days: 7
+
+  # ── QUALITY GATE ─────────────────────────────────────────────────────────────
+  quality-gate:
+    name: "Quality Gate"
+    needs: [report]
+    if: always() && needs.report.result == 'success'
+    uses: ./.github/workflows/shared/quality-gate.yml
+    with:
+      min-pass-rate: "95"
+      max-flaky-count: "3"
+      block-on-failure: "true"
+      metrics-artifact: "qa-metrics"
+
+  # ── ALLURE ───────────────────────────────────────────────────────────────────
+  allure:
+    name: "Allure Report"
+    needs: [report]
+    if: always()
+    uses: ./.github/workflows/shared/allure-report.yml
+    with:
+      artifact-pattern: "allure-results-*"
+      report-title: "Cypress — Saucedemo QA Report"
+      publish-pages: "false"
+    secrets:
+      GH_PAGES_TOKEN: ${{ secrets.GH_PAGES_TOKEN }}
+
+  # ── NOTIFY ───────────────────────────────────────────────────────────────────
+  notify:
+    name: "Notify"
+    needs: [report, quality-gate]
+    if: always()
+    uses: ./.github/workflows/shared/notify.yml
+    with:
+      status: ${{ needs.quality-gate.result }}
+      tool: "Cypress"
+      environment: "saucedemo.com"
+      pass-rate: ${{ needs.report.outputs.pass-rate }}
+      test-total: ${{ needs.report.outputs.total }}
+      test-failed: ${{ needs.report.outputs.failed }}
+      notify-slack: ${{ inputs.notify-slack || 'false' }}
+      notify-on: "always"
+      mention-on-failure: "@qa-team"
+    secrets:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

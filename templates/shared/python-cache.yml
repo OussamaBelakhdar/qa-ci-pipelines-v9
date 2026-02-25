@@ -1,0 +1,41 @@
+name: "Shared — Python Cache"
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        required: false
+        default: "3.11"
+        type: string
+      requirements-file:
+        required: false
+        default: "requirements.txt"
+        type: string
+    outputs:
+      cache-hit:
+        value: ${{ jobs.cache-python.outputs.cache-hit }}
+
+jobs:
+  cache-python:
+    name: "Cache Python ${{ inputs.python-version }}"
+    runs-on: ubuntu-latest
+    outputs:
+      cache-hit: ${{ steps.cache.outputs.cache-hit }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+      - name: Cache pip packages
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-py${{ inputs.python-version }}-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-py${{ inputs.python-version }}-
+            pip-${{ runner.os }}-
+      - name: Install dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: pip install -r ${{ inputs.requirements-file }}

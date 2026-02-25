@@ -1,0 +1,376 @@
+name: "🛒 Demo — Cypress / Saucedemo"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LIVE DEMO — This pipeline runs real E2E tests against saucedemo.com
+# It is self-contained: quality gate and reporting are inlined (no external uses:)
+# so it works as a standalone proof-of-concept without repo configuration.
+#
+# Tests covered:
+#   ✅ Auth    — valid login, locked user, empty fields, wrong password
+#   ✅ Catalog — 6 products, sort A-Z / Z-A / price, product detail
+#   ✅ Cart    — add, remove, badge count, persistence
+#   ✅ Checkout— form validation, order complete, price = subtotal + tax
+#
+# App under test: https://www.saucedemo.com (Sauce Labs official test site)
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "demo/**"
+      - ".github/workflows/demo-cypress-saucedemo.yml"
+  schedule:
+    - cron: "0 7 * * 1-5"   # Weekdays 07:00 UTC — keeps badges fresh
+  workflow_dispatch:
+    inputs:
+      browser:
+        description: "Browser"
+        default: "chrome"
+        type: choice
+        options: [chrome, firefox, edge]
+      notify-slack:
+        description: "Send Slack notification"
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+env:
+  NODE_VERSION: "20"
+  BROWSER: ${{ inputs.browser || 'chrome' }}
+  BASE_URL: "https://www.saucedemo.com"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# LAYER 1 — SETUP
+# ═════════════════════════════════════════════════════════════════════════════
+jobs:
+  setup:
+    name: "⚙️ Setup — Node 20 + Cypress"
+    runs-on: ubuntu-latest
+    outputs:
+      cache-key: ${{ steps.cache-key.outputs.key }}
+      browser:   ${{ steps.browser.outputs.value }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve browser
+        id: browser
+        run: |
+          BROWSER="${{ inputs.browser }}"
+          echo "value=${BROWSER:-chrome}" >> $GITHUB_OUTPUT
+
+      - name: Compute cache key
+        id: cache-key
+        run: |
+          echo "key=cypress-demo-${{ runner.os }}-node20-${{ hashFiles('demo/package-lock.json', 'demo/package.json') }}" >> $GITHUB_OUTPUT
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: demo/package-lock.json
+
+      - name: Cache Cypress binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/Cypress
+          key: ${{ steps.cache-key.outputs.key }}
+          restore-keys: |
+            cypress-demo-${{ runner.os }}-node20-
+
+      - name: Install dependencies
+        working-directory: demo
+        run: npm ci
+
+      - name: Verify Cypress
+        working-directory: demo
+        run: npx cypress verify
+
+      - name: Print environment
+        run: |
+          echo "## ⚙️ Setup" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Node | $(node -v) |" >> $GITHUB_STEP_SUMMARY
+          echo "| npm | $(npm -v) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Browser | ${{ steps.browser.outputs.value }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Target | ${{ env.BASE_URL }} |" >> $GITHUB_STEP_SUMMARY
+
+# ═════════════════════════════════════════════════════════════════════════════
+# LAYER 2 — TEST (3 shards)
+# ═════════════════════════════════════════════════════════════════════════════
+  test:
+    name: "🧪 Tests — Shard ${{ matrix.shard }}/3 (${{ matrix.browser }})"
+    runs-on: ubuntu-latest
+    needs: setup
+    fail-fast: false
+    strategy:
+      matrix:
+        browser: ["${{ needs.setup.outputs.browser }}"]
+        shard: [1, 2, 3]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: demo/package-lock.json
+
+      - name: Restore Cypress cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/Cypress
+          key: ${{ needs.setup.outputs.cache-key }}
+
+      - name: Install dependencies
+        working-directory: demo
+        run: npm ci
+
+      - name: Run Cypress — Shard ${{ matrix.shard }}/3
+        working-directory: demo
+        run: |
+          # Shard spec assignment:
+          # Shard 1 → auth tests
+          # Shard 2 → catalog + cart tests  (two dirs passed as separate --spec flags)
+          # Shard 3 → checkout tests
+          #
+          # NOTE: Cypress 13 with globs requires separate --spec flags per pattern,
+          # not a comma-separated string. A single --spec with a comma only works
+          # for explicit file paths, not glob expressions.
+          SHARD="${{ matrix.shard }}"
+          if [ "$SHARD" = "1" ]; then
+            SPEC_FLAGS="--spec cypress/e2e/auth/**/*.cy.js"
+          elif [ "$SHARD" = "2" ]; then
+            SPEC_FLAGS="--spec cypress/e2e/catalog/**/*.cy.js --spec cypress/e2e/cart/**/*.cy.js"
+          else
+            SPEC_FLAGS="--spec cypress/e2e/checkout/**/*.cy.js"
+          fi
+
+          npx cypress run \
+            --browser ${{ matrix.browser }} \
+            $SPEC_FLAGS \
+            --reporter mochawesome \
+            --reporter-options "reportDir=mochawesome-report,overwrite=false,html=false,json=true,reportFilename=shard-${{ matrix.shard }}"
+        env:
+          CYPRESS_BASE_URL: ${{ env.BASE_URL }}
+
+      - name: Upload Mochawesome JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mochawesome-shard${{ matrix.shard }}
+          path: demo/mochawesome-report/shard-${{ matrix.shard }}.json
+          retention-days: 7
+
+      - name: Upload screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ matrix.browser }}-shard${{ matrix.shard }}
+          path: demo/cypress/screenshots
+          retention-days: 14
+
+      - name: Upload videos
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: videos-${{ matrix.browser }}-shard${{ matrix.shard }}
+          path: demo/cypress/videos
+          retention-days: 7
+
+# ═════════════════════════════════════════════════════════════════════════════
+# LAYER 3 — REPORT: merge shards → metrics
+# ═════════════════════════════════════════════════════════════════════════════
+  report:
+    name: "📊 Report — Merge & Metrics"
+    runs-on: ubuntu-latest
+    needs: test
+    if: always()
+    outputs:
+      pass-rate: ${{ steps.metrics.outputs.pass_rate }}
+      total:     ${{ steps.metrics.outputs.total }}
+      passed:    ${{ steps.metrics.outputs.passed }}
+      failed:    ${{ steps.metrics.outputs.failed }}
+    steps:
+      - name: Download all Mochawesome shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mochawesome-shard*
+          merge-multiple: true
+          path: mochawesome-report
+
+      - name: Parse metrics from Mochawesome JSON
+        id: metrics
+        run: |
+          python3 << 'PYEOF'
+          import json, glob, os
+
+          total = passed = failed = pending = 0
+          for f in glob.glob('mochawesome-report/*.json'):
+              try:
+                  d = json.load(open(f))
+                  s = d.get('stats', {})
+                  total   += s.get('tests',    0)
+                  passed  += s.get('passes',   0)
+                  failed  += s.get('failures', 0)
+                  pending += s.get('pending',  0)
+              except Exception as e:
+                  print(f"Warning: could not parse {f}: {e}")
+
+          rate = round(passed / total * 100, 2) if total > 0 else 0.0
+
+          os.makedirs("qa-metrics", exist_ok=True)
+          with open("qa-metrics/metrics.json", "w") as f:
+              json.dump({
+                  "tool": "cypress",
+                  "total": total, "passed": passed, "failed": failed,
+                  "skipped": pending, "flaky_count": 0, "pass_rate": rate
+              }, f, indent=2)
+
+          print(f"Total={total} | Passed={passed} | Failed={failed} | Rate={rate}%")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"total={total}\npassed={passed}\nfailed={failed}\npass_rate={rate}\n")
+          PYEOF
+
+      - name: Upload qa-metrics artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-metrics
+          path: qa-metrics/metrics.json
+          retention-days: 7
+
+      - name: Generate Step Summary
+        run: |
+          TOTAL="${{ steps.metrics.outputs.total }}"
+          PASSED="${{ steps.metrics.outputs.passed }}"
+          FAILED="${{ steps.metrics.outputs.failed }}"
+          RATE="${{ steps.metrics.outputs.pass_rate }}"
+          ICON=$([ "$FAILED" = "0" ] && echo "✅" || echo "❌")
+
+          echo "## $ICON Cypress — Saucedemo Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| ✅ Passed | $PASSED |" >> $GITHUB_STEP_SUMMARY
+          echo "| ❌ Failed | $FAILED |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📊 Total | $TOTAL |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🎯 Pass rate | **${RATE}%** |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🌐 Browser | ${{ needs.setup.outputs.browser }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🌍 Target | ${{ env.BASE_URL }} |" >> $GITHUB_STEP_SUMMARY
+
+# ═════════════════════════════════════════════════════════════════════════════
+# LAYER 4 — QUALITY GATE (inlined — no external uses:)
+# ═════════════════════════════════════════════════════════════════════════════
+  quality-gate:
+    name: "🚦 Quality Gate"
+    runs-on: ubuntu-latest
+    needs: report
+    if: always() && needs.report.result == 'success'
+    steps:
+      - name: Download qa-metrics
+        uses: actions/download-artifact@v4
+        with:
+          name: qa-metrics
+          path: qa-metrics
+
+      - name: Evaluate thresholds
+        run: |
+          python3 << 'PYEOF'
+          import json, sys, os
+
+          MIN_PASS_RATE  = 95.0
+          MAX_FLAKY      = 5
+
+          with open("qa-metrics/metrics.json") as f:
+              m = json.load(f)
+
+          total      = m.get("total", 0)
+          passed     = m.get("passed", 0)
+          failed     = m.get("failed", 0)
+          flaky      = m.get("flaky_count", 0)
+          pass_rate  = m.get("pass_rate", 0.0)
+
+          violations = []
+          if pass_rate < MIN_PASS_RATE:
+              violations.append(f"Pass rate {pass_rate}% < required {MIN_PASS_RATE}%")
+          if flaky > MAX_FLAKY:
+              violations.append(f"Flaky tests {flaky} > max {MAX_FLAKY}")
+
+          print(f"{'='*50}")
+          print(f"  QUALITY GATE — cypress")
+          print(f"{'='*50}")
+          print(f"  Total:      {total}")
+          print(f"  Passed:     {passed}")
+          print(f"  Failed:     {failed}")
+          print(f"  Pass rate:  {pass_rate}%  (threshold: ≥{MIN_PASS_RATE}%)")
+          print(f"  Flaky:      {flaky}  (threshold: ≤{MAX_FLAKY})")
+          print(f"{'='*50}")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+              icon = "✅" if not violations else "❌"
+              s.write(f"\n## {icon} Quality Gate\n\n")
+              s.write("| Metric | Value | Threshold | Status |\n")
+              s.write("|--------|-------|-----------|--------|\n")
+              s.write(f"| Pass rate | {pass_rate}% | ≥{MIN_PASS_RATE}% | {'✅' if pass_rate >= MIN_PASS_RATE else '❌'} |\n")
+              s.write(f"| Flaky tests | {flaky} | ≤{MAX_FLAKY} | {'✅' if flaky <= MAX_FLAKY else '❌'} |\n")
+              if violations:
+                  s.write("\n### Violations\n\n")
+                  for v in violations:
+                      s.write(f"- {v}\n")
+
+          if violations:
+              print(f"\n❌ GATE FAILED: {len(violations)} violation(s)")
+              for v in violations:
+                  print(f"   • {v}")
+              sys.exit(1)
+          else:
+              print("\n✅ GATE PASSED — all thresholds met")
+          PYEOF
+
+# ═════════════════════════════════════════════════════════════════════════════
+# LAYER 5 — NOTIFY (Slack — optional, triggered only if notify-slack=true)
+# ═════════════════════════════════════════════════════════════════════════════
+  notify:
+    name: "📣 Notify"
+    runs-on: ubuntu-latest
+    needs: [report, quality-gate]
+    if: always() && inputs.notify-slack == 'true'
+    steps:
+      - name: Send Slack notification
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          STATUS="${{ needs.quality-gate.result }}"
+          RATE="${{ needs.report.outputs.pass-rate }}"
+          TOTAL="${{ needs.report.outputs.total }}"
+          FAILED="${{ needs.report.outputs.failed }}"
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          [ "$STATUS" = "success" ] && COLOR="#36a64f" && EMOJI="✅" || COLOR="#d32f2f" && EMOJI="❌"
+
+          curl -s -o /dev/null -w "%{http_code}" -X POST \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"attachments\": [{
+                \"color\": \"$COLOR\",
+                \"blocks\": [
+                  {\"type\": \"header\", \"text\": {\"type\": \"plain_text\", \"text\": \"$EMOJI Cypress — Saucedemo — Pipeline $STATUS\"}},
+                  {\"type\": \"section\", \"fields\": [
+                    {\"type\": \"mrkdwn\", \"text\": \"*Pass rate*\\n${RATE}%\"},
+                    {\"type\": \"mrkdwn\", \"text\": \"*Tests*\\n$TOTAL total / $FAILED failed\"},
+                    {\"type\": \"mrkdwn\", \"text\": \"*Branch*\\n${{ github.ref_name }}\"},
+                    {\"type\": \"mrkdwn\", \"text\": \"*Triggered by*\\n${{ github.actor }}\"}
+                  ]},
+                  {\"type\": \"actions\", \"elements\": [
+                    {\"type\": \"button\", \"text\": {\"type\": \"plain_text\", \"text\": \"View Run\"}, \"url\": \"$RUN_URL\", \"style\": \"primary\"}
+                  ]}
+                ]
+              }]
+            }" \
+            "$SLACK_WEBHOOK_URL"

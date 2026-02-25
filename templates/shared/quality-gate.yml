@@ -1,0 +1,216 @@
+name: "Shared — Quality Gate"
+
+# Reusable workflow: enforces configurable quality thresholds before merging.
+# Reads metrics from a standardized JSON file produced by test jobs.
+#
+# Contract — the upstream job must upload an artifact named 'qa-metrics'
+# containing a file 'metrics.json' with this schema:
+#
+#   {
+#     "tool":          "cypress",
+#     "total":         120,
+#     "passed":        115,
+#     "failed":        5,
+#     "skipped":       0,
+#     "duration_ms":   45000,
+#     "flaky_count":   2,
+#     "p95_ms":        1200,       ← optional (performance tests)
+#     "error_rate_pct": 4.16       ← optional (performance tests)
+#   }
+#
+# Usage:
+#
+#   jobs:
+#     gate:
+#       needs: [test]
+#       uses: your-org/qa-ci-pipelines/.github/workflows/templates/shared/quality-gate.yml@main
+#       with:
+#         min-pass-rate: '95'
+#         max-error-rate: '5'
+#         max-p95-ms: '2000'
+#         max-flaky-count: '3'
+#         block-on-failure: 'true'
+
+on:
+  workflow_call:
+    inputs:
+      # ── Functional thresholds ─────────────────────────────────────────────────
+      min-pass-rate:
+        description: "Minimum pass rate % (e.g. 95 means 95%)"
+        required: false
+        default: "95"
+        type: string
+      max-flaky-count:
+        description: "Maximum number of flaky tests tolerated"
+        required: false
+        default: "5"
+        type: string
+      # ── Performance thresholds ────────────────────────────────────────────────
+      max-error-rate:
+        description: "Maximum HTTP error rate % for performance tests"
+        required: false
+        default: "5"
+        type: string
+      max-p95-ms:
+        description: "Maximum p95 response time in ms for performance tests (0 = disabled)"
+        required: false
+        default: "0"
+        type: string
+      # ── Behavior ─────────────────────────────────────────────────────────────
+      block-on-failure:
+        description: "Exit with error code if any threshold is exceeded (true/false)"
+        required: false
+        default: "true"
+        type: string
+      metrics-artifact:
+        description: "Name of the artifact containing metrics.json"
+        required: false
+        default: "qa-metrics"
+        type: string
+    outputs:
+      gate-passed:
+        description: "true if all thresholds passed, false otherwise"
+        value: ${{ jobs.evaluate.outputs.gate-passed }}
+      pass-rate:
+        description: "Actual pass rate computed from metrics"
+        value: ${{ jobs.evaluate.outputs.pass-rate }}
+      violations:
+        description: "Number of threshold violations detected"
+        value: ${{ jobs.evaluate.outputs.violations }}
+
+jobs:
+  evaluate:
+    name: "Quality Gate — Evaluate Thresholds"
+    runs-on: ubuntu-latest
+    outputs:
+      gate-passed: ${{ steps.gate.outputs.passed }}
+      pass-rate: ${{ steps.gate.outputs.pass_rate }}
+      violations: ${{ steps.gate.outputs.violations }}
+    steps:
+      - name: Download metrics artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.metrics-artifact }}
+          path: gate-input
+
+      - name: Evaluate quality gate
+        id: gate
+        run: |
+          python3 << 'PYEOF'
+          import json, os, sys
+
+          # ── Load metrics ───────────────────────────────────────────────────────
+          metrics_file = "gate-input/metrics.json"
+          if not os.path.exists(metrics_file):
+              print("❌ metrics.json not found in artifact.")
+              print("Make sure your test job uploads 'qa-metrics' artifact with metrics.json")
+              sys.exit(1)
+
+          with open(metrics_file) as f:
+              m = json.load(f)
+
+          tool          = m.get("tool", "unknown")
+          total         = m.get("total", 0)
+          passed        = m.get("passed", 0)
+          failed        = m.get("failed", 0)
+          flaky_count   = m.get("flaky_count", 0)
+          p95_ms        = m.get("p95_ms", None)
+          error_rate    = m.get("error_rate_pct", None)
+
+          # ── Compute metrics ────────────────────────────────────────────────────
+          pass_rate = round(passed / total * 100, 2) if total > 0 else 0.0
+
+          # ── Thresholds from env ────────────────────────────────────────────────
+          min_pass_rate   = float(os.environ.get("MIN_PASS_RATE", "95"))
+          max_flaky       = int(os.environ.get("MAX_FLAKY_COUNT", "5"))
+          max_error_rate  = float(os.environ.get("MAX_ERROR_RATE", "5"))
+          max_p95         = float(os.environ.get("MAX_P95_MS", "0"))
+
+          violations = []
+          warnings   = []
+
+          # ── Evaluate each threshold ────────────────────────────────────────────
+          if pass_rate < min_pass_rate:
+              violations.append(
+                  f"Pass rate {pass_rate}% < required {min_pass_rate}%  "
+                  f"(failed: {failed}/{total})"
+              )
+
+          if flaky_count > max_flaky:
+              violations.append(
+                  f"Flaky tests {flaky_count} > max allowed {max_flaky}"
+              )
+
+          if error_rate is not None and error_rate > max_error_rate:
+              violations.append(
+                  f"Error rate {error_rate}% > max allowed {max_error_rate}%"
+              )
+
+          if p95_ms is not None and max_p95 > 0 and p95_ms > max_p95:
+              violations.append(
+                  f"p95 response {p95_ms}ms > max allowed {max_p95}ms"
+              )
+
+          gate_passed = len(violations) == 0
+
+          # ── Print report ───────────────────────────────────────────────────────
+          print(f"\n{'='*55}")
+          print(f"  QUALITY GATE REPORT — {tool.upper()}")
+          print(f"{'='*55}")
+          print(f"  Tool:        {tool}")
+          print(f"  Total tests: {total}")
+          print(f"  Passed:      {passed}")
+          print(f"  Failed:      {failed}")
+          print(f"  Pass rate:   {pass_rate}%  (threshold: ≥ {min_pass_rate}%)")
+          print(f"  Flaky:       {flaky_count}  (threshold: ≤ {max_flaky})")
+          if error_rate is not None:
+              print(f"  Error rate:  {error_rate}%  (threshold: ≤ {max_error_rate}%)")
+          if p95_ms is not None:
+              print(f"  p95 (ms):    {p95_ms}ms  (threshold: ≤ {max_p95}ms)")
+          print(f"{'='*55}")
+
+          if violations:
+              print(f"\n❌ GATE FAILED — {len(violations)} violation(s):")
+              for v in violations:
+                  print(f"   • {v}")
+          else:
+              print(f"\n✅ GATE PASSED — All thresholds met")
+
+          print(f"{'='*55}\n")
+
+          # ── Write GitHub outputs ───────────────────────────────────────────────
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"passed={'true' if gate_passed else 'false'}\n")
+              out.write(f"pass_rate={pass_rate}\n")
+              out.write(f"violations={len(violations)}\n")
+
+          # ── Write GitHub Step Summary ──────────────────────────────────────────
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+              icon = "✅" if gate_passed else "❌"
+              s.write(f"## {icon} Quality Gate — {tool.upper()}\n\n")
+              s.write(f"| Metric | Value | Threshold | Status |\n")
+              s.write(f"|--------|-------|-----------|--------|\n")
+              s.write(f"| Pass rate | {pass_rate}% | ≥ {min_pass_rate}% | {'✅' if pass_rate >= min_pass_rate else '❌'} |\n")
+              s.write(f"| Failed tests | {failed} | — | {'✅' if failed == 0 else '⚠️'} |\n")
+              s.write(f"| Flaky tests | {flaky_count} | ≤ {max_flaky} | {'✅' if flaky_count <= max_flaky else '❌'} |\n")
+              if error_rate is not None:
+                  s.write(f"| Error rate | {error_rate}% | ≤ {max_error_rate}% | {'✅' if error_rate <= max_error_rate else '❌'} |\n")
+              if p95_ms is not None and max_p95 > 0:
+                  s.write(f"| p95 response | {p95_ms}ms | ≤ {max_p95}ms | {'✅' if p95_ms <= max_p95 else '❌'} |\n")
+
+              if violations:
+                  s.write(f"\n### ❌ Violations\n\n")
+                  for v in violations:
+                      s.write(f"- {v}\n")
+
+          # ── Exit code ──────────────────────────────────────────────────────────
+          block = os.environ.get("BLOCK_ON_FAILURE", "true").lower()
+          if not gate_passed and block == "true":
+              sys.exit(1)
+          PYEOF
+        env:
+          MIN_PASS_RATE: ${{ inputs.min-pass-rate }}
+          MAX_FLAKY_COUNT: ${{ inputs.max-flaky-count }}
+          MAX_ERROR_RATE: ${{ inputs.max-error-rate }}
+          MAX_P95_MS: ${{ inputs.max-p95-ms }}
+          BLOCK_ON_FAILURE: ${{ inputs.block-on-failure }}

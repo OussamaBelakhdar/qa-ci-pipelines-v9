@@ -1,0 +1,234 @@
+name: "Performance — k6"
+
+# ─── CHANGELOG ─────────────────────────────────────────────────────────────
+# v2.0 — Added: qa-metrics with p95/error_rate, Quality Gate with perf thresholds,
+#         Allure results, Docker runner option, Slack notification.
+# v1.0 — Initial template: k6 with scenario selection and summary export.
+# ───────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 3 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      script:
+        description: "k6 script path"
+        required: false
+        default: "tests/load.js"
+      vus:
+        description: "Virtual users"
+        required: false
+        default: "50"
+      duration:
+        description: "Duration (e.g. 2m)"
+        required: false
+        default: "2m"
+      environment:
+        description: "Target environment"
+        required: false
+        default: "staging"
+        type: choice
+        options: ["dev", "staging", "production"]
+      scenario:
+        description: "Load scenario"
+        required: false
+        default: "smoke"
+        type: choice
+        options: ["smoke", "load", "stress", "spike", "soak"]
+      use-docker:
+        description: "Run k6 inside Docker container"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      notify-slack:
+        description: "Send Slack notification"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      # Quality gate thresholds (overridable per run)
+      max-error-rate:
+        description: "Max HTTP error rate % (Quality Gate)"
+        required: false
+        default: "5"
+      max-p95-ms:
+        description: "Max p95 response time in ms (Quality Gate, 0=disabled)"
+        required: false
+        default: "2000"
+
+env:
+  K6_SCRIPT: ${{ inputs.script || 'tests/load.js' }}
+  K6_VUS: ${{ inputs.vus || '50' }}
+  K6_DURATION: ${{ inputs.duration || '2m' }}
+  ENVIRONMENT: ${{ inputs.environment || 'staging' }}
+  SCENARIO: ${{ inputs.scenario || 'smoke' }}
+
+jobs:
+  # LAYER 1 — TEST
+  k6-test:
+    name: "k6 — ${{ inputs.scenario || 'smoke' }} / ${{ inputs.vus || '50' }}vus"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring \
+            --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+            --keyserver hkp://keyserver.ubuntu.com:80 \
+            --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
+            | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update -q
+          sudo apt-get install k6 -y -q
+
+      - name: Create results directory
+        run: mkdir -p results allure-results
+
+      - name: Run k6 — ${{ env.SCENARIO }}
+        run: |
+          STAGE_FLAGS=""
+          case "${{ env.SCENARIO }}" in
+            smoke)  STAGE_FLAGS="--vus 5 --duration 30s" ;;
+            load)   STAGE_FLAGS="--vus ${{ env.K6_VUS }} --duration ${{ env.K6_DURATION }}" ;;
+            stress) STAGE_FLAGS="--stage 2m:${{ env.K6_VUS }},5m:${{ env.K6_VUS }},2m:0" ;;
+            spike)  STAGE_FLAGS="--stage 10s:10,1m:${{ env.K6_VUS }},10s:10" ;;
+            soak)   STAGE_FLAGS="--vus ${{ env.K6_VUS }} --duration 30m" ;;
+          esac
+
+          k6 run \
+            $STAGE_FLAGS \
+            --out json=results/k6-raw.json \
+            --summary-export=results/k6-summary.json \
+            -e BASE_URL=${{ secrets.BASE_URL || 'https://staging.example.com' }} \
+            -e ENVIRONMENT=${{ env.ENVIRONMENT }} \
+            ${{ env.K6_SCRIPT }}
+
+      - name: Upload k6 raw results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-raw-${{ env.SCENARIO }}-${{ env.ENVIRONMENT }}
+          path: results/
+          retention-days: 30
+
+  # LAYER 2 — REPORT: parse metrics → qa-metrics artifact
+  report:
+    name: "Report — Metrics"
+    runs-on: ubuntu-latest
+    needs: k6-test
+    if: always()
+    outputs:
+      pass-rate: ${{ steps.metrics.outputs.pass_rate }}
+      error-rate: ${{ steps.metrics.outputs.error_rate }}
+      p95-ms: ${{ steps.metrics.outputs.p95_ms }}
+    steps:
+      - name: Download k6 summary
+        uses: actions/download-artifact@v4
+        with:
+          name: k6-raw-${{ env.SCENARIO }}-${{ env.ENVIRONMENT }}
+          path: results
+
+      - name: Parse k6 metrics
+        id: metrics
+        run: |
+          python3 << 'PYEOF'
+          import json, os
+
+          p95_ms = error_rate = pass_rate = 0.0
+          total = passed = failed = 0
+
+          try:
+              with open('results/k6-summary.json') as f:
+                  data = json.load(f)
+              metrics = data.get('metrics', {})
+
+              http_dur    = metrics.get('http_req_duration', {}).get('values', {})
+              http_failed = metrics.get('http_req_failed',  {}).get('values', {})
+              http_reqs   = metrics.get('http_reqs',        {}).get('values', {})
+
+              p95_ms     = http_dur.get('p(95)', 0)
+              error_rate = http_failed.get('rate', 0) * 100
+              total      = int(http_reqs.get('count', 0))
+              failed     = int(total * http_failed.get('rate', 0))
+              passed     = total - failed
+              pass_rate  = round(passed / total * 100, 2) if total > 0 else 0.0
+
+              p95_ms = round(p95_ms, 1)
+              error_rate = round(error_rate, 2)
+
+          except Exception as e:
+              print(f"Warning: could not parse k6 summary: {e}")
+
+          print(f"Total: {total} | Passed: {passed} | Error rate: {error_rate}% | p95: {p95_ms}ms")
+
+          os.makedirs("qa-metrics", exist_ok=True)
+          with open("qa-metrics/metrics.json", "w") as f:
+              json.dump({
+                  "tool": "k6",
+                  "total": total, "passed": passed, "failed": failed,
+                  "skipped": 0, "flaky_count": 0, "pass_rate": pass_rate,
+                  "p95_ms": p95_ms, "error_rate_pct": error_rate
+              }, f, indent=2)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"pass_rate={pass_rate}\n")
+              out.write(f"error_rate={error_rate}\n")
+              out.write(f"p95_ms={p95_ms}\n")
+              out.write(f"total={total}\n")
+              out.write(f"failed={failed}\n")
+
+          # Step Summary
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+              s.write("## 📈 k6 Performance Metrics\n\n")
+              s.write("| Metric | Value |\n|--------|-------|\n")
+              s.write(f"| Scenario | ${{ env.SCENARIO }} |\n")
+              s.write(f"| Environment | ${{ env.ENVIRONMENT }} |\n")
+              s.write(f"| Total requests | {total} |\n")
+              s.write(f"| Error rate | {error_rate}% |\n")
+              s.write(f"| p95 response | {p95_ms}ms |\n")
+              s.write(f"| Pass rate | {pass_rate}% |\n")
+          PYEOF
+
+      - name: Upload qa-metrics
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-metrics
+          path: qa-metrics/metrics.json
+          retention-days: 7
+
+  # LAYER 3 — QUALITY GATE (performance-aware)
+  quality-gate:
+    name: "Quality Gate"
+    needs: [report]
+    if: always() && needs.report.result == 'success'
+    uses: ./.github/workflows/shared/quality-gate.yml
+    with:
+      min-pass-rate: "95"
+      max-error-rate: ${{ inputs.max-error-rate || '5' }}
+      max-p95-ms: ${{ inputs.max-p95-ms || '2000' }}
+      max-flaky-count: "999"
+      block-on-failure: "true"
+      metrics-artifact: "qa-metrics"
+
+  # LAYER 4 — NOTIFICATION
+  notify:
+    name: "Notify"
+    needs: [report, quality-gate]
+    if: always()
+    uses: ./.github/workflows/shared/notify.yml
+    with:
+      status: ${{ needs.quality-gate.result }}
+      tool: "k6"
+      environment: ${{ inputs.environment || 'staging' }}
+      pass-rate: ${{ needs.report.outputs.pass-rate }}
+      notify-slack: ${{ inputs.notify-slack || 'false' }}
+      notify-on: "failure-only"
+      mention-on-failure: "@qa-team"
+    secrets:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

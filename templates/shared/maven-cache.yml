@@ -1,0 +1,43 @@
+name: "Shared — Maven Cache"
+
+on:
+  workflow_call:
+    inputs:
+      java-version:
+        required: false
+        default: "17"
+        type: string
+      working-directory:
+        required: false
+        default: "."
+        type: string
+    outputs:
+      cache-hit:
+        value: ${{ jobs.cache-maven.outputs.cache-hit }}
+
+jobs:
+  cache-maven:
+    name: "Cache Maven — Java ${{ inputs.java-version }}"
+    runs-on: ubuntu-latest
+    outputs:
+      cache-hit: ${{ steps.cache.outputs.cache-hit }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+          cache: maven
+      - name: Cache .m2
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: maven-${{ runner.os }}-java${{ inputs.java-version }}-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            maven-${{ runner.os }}-java${{ inputs.java-version }}-
+            maven-${{ runner.os }}-
+      - name: Pre-download dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        working-directory: ${{ inputs.working-directory }}
+        run: mvn dependency:resolve --no-transfer-progress

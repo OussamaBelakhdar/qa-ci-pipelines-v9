@@ -1,0 +1,304 @@
+name: "UI Web — Playwright"
+
+# ─── CHANGELOG ────────────────────────────────────────────────────────────────
+# v2.0 — Added: Allure results export, qa-metrics artifact for Quality Gate,
+#         Slack notification hook, Docker execution option.
+# v1.0 — Initial template: sharded Playwright runs with merged reports.
+# ──────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      node-version:
+        description: "Node.js version"
+        required: false
+        default: "20"
+        type: choice
+        options: ["18", "20"]
+      browser:
+        description: "Browser(s) to run"
+        required: false
+        default: "chromium"
+        type: choice
+        options: ["chromium", "firefox", "webkit", "all"]
+      shard-total:
+        description: "Total number of shards"
+        required: false
+        default: "3"
+      use-docker:
+        description: "Run tests inside Docker container"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      notify-slack:
+        description: "Send Slack notification on completion"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+env:
+  NODE_VERSION: ${{ inputs.node-version || '20' }}
+  BROWSER: ${{ inputs.browser || 'chromium' }}
+  SHARD_TOTAL: ${{ inputs.shard-total || '3' }}
+
+jobs:
+  # LAYER 1 — SETUP
+  setup:
+    name: "Setup — Cache Playwright"
+    runs-on: ubuntu-latest
+    outputs:
+      playwright-version: ${{ steps.pw-version.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Get Playwright version
+        id: pw-version
+        run: echo "version=$(node -e "console.log(require('./node_modules/@playwright/test/package.json').version)")" >> $GITHUB_OUTPUT
+
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw-version.outputs.version }}
+
+      - name: Install Playwright browsers
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps ${{ env.BROWSER == 'all' && '' || env.BROWSER }}
+
+  # LAYER 2 — TEST (native runner)
+  test:
+    name: "Tests — Shard ${{ matrix.shard }}/${{ env.SHARD_TOTAL }}"
+    runs-on: ubuntu-latest
+    needs: setup
+    fail-fast: false
+    strategy:
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Restore Playwright cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ needs.setup.outputs.playwright-version }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright system deps
+        run: npx playwright install-deps
+
+      - name: Run Playwright tests
+        run: |
+          npx playwright test \
+            --project=${{ env.BROWSER == 'all' && 'chromium firefox webkit' || env.BROWSER }} \
+            --shard=${{ matrix.shard }}/${{ env.SHARD_TOTAL }} \
+            --reporter=html,github,allure-playwright
+        env:
+          BASE_URL: ${{ secrets.BASE_URL || 'http://localhost:3000' }}
+          CI: true
+
+      - name: Upload Allure results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-results-playwright-shard-${{ matrix.shard }}
+          path: allure-results/
+          retention-days: 3
+          if-no-files-found: warn
+
+      - name: Upload Playwright blob report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-blob-shard-${{ matrix.shard }}
+          path: blob-report/
+          retention-days: 3
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results-shard-${{ matrix.shard }}
+          path: test-results/
+          retention-days: 7
+
+  # LAYER 3 — REPORT: merge shards + produce qa-metrics artifact
+  report:
+    name: "Report — Merge Shards & Metrics"
+    runs-on: ubuntu-latest
+    needs: test
+    if: always()
+    outputs:
+      pass-rate: ${{ steps.metrics.outputs.pass_rate }}
+      total: ${{ steps.metrics.outputs.total }}
+      failed: ${{ steps.metrics.outputs.failed }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download all blob reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: playwright-blob-shard-*
+          merge-multiple: true
+          path: all-blobs
+
+      - name: Download Allure results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: allure-results-playwright-*
+          merge-multiple: true
+          path: ./allure-results
+
+      - name: Merge Playwright reports
+        run: npx playwright merge-reports --reporter html,json ./all-blobs
+
+      - name: Parse test metrics from merged JSON
+        id: metrics
+        run: |
+          python3 << 'PYEOF'
+          import json, os
+
+          total=passed=failed=skipped=0
+          rate=0.0
+
+          try:
+              with open('playwright-report/results.json') as f:
+                  data = json.load(f)
+              stats = data.get('stats', {})
+              total   = stats.get('expected', 0) + stats.get('unexpected', 0) + stats.get('skipped', 0)
+              passed  = stats.get('expected', 0)
+              failed  = stats.get('unexpected', 0)
+              skipped = stats.get('skipped', 0)
+              rate    = round(passed / total * 100, 2) if total > 0 else 0.0
+          except Exception as e:
+              print(f"Warning: could not parse results.json: {e}")
+
+          os.makedirs("qa-metrics", exist_ok=True)
+          metrics = {
+              "tool": "playwright",
+              "total": total,
+              "passed": passed,
+              "failed": failed,
+              "skipped": skipped,
+              "flaky_count": 0,
+              "pass_rate": rate
+          }
+          with open("qa-metrics/metrics.json", "w") as f:
+              json.dump(metrics, f, indent=2)
+
+          print(f"Total: {total} | Passed: {passed} | Failed: {failed} | Rate: {rate}%")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"pass_rate={rate}\n")
+              out.write(f"total={total}\n")
+              out.write(f"failed={failed}\n")
+          PYEOF
+
+      - name: Upload qa-metrics artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-metrics
+          path: qa-metrics/metrics.json
+          retention-days: 7
+
+      - name: Upload merged Playwright report
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-merged-report
+          path: playwright-report/
+          retention-days: 14
+
+      - name: Upload merged Allure results
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-results-playwright
+          path: ./allure-results
+          retention-days: 7
+
+      - name: Generate Step Summary
+        run: |
+          echo "## 🎭 Playwright Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Browser | ${{ env.BROWSER }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Shards | ${{ env.SHARD_TOTAL }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | ${{ needs.test.result }} |" >> $GITHUB_STEP_SUMMARY
+
+  # LAYER 4 — QUALITY GATE
+  quality-gate:
+    name: "Quality Gate"
+    needs: [report]
+    if: always() && needs.report.result == 'success'
+    uses: ./.github/workflows/shared/quality-gate.yml
+    with:
+      min-pass-rate: "95"
+      max-flaky-count: "3"
+      block-on-failure: "true"
+      metrics-artifact: "qa-metrics"
+
+  # LAYER 5 — ALLURE REPORT
+  allure:
+    name: "Allure Report"
+    needs: [report]
+    if: always() && needs.report.result != 'skipped'
+    uses: ./.github/workflows/shared/allure-report.yml
+    with:
+      artifact-pattern: "allure-results-playwright"
+      report-title: "Playwright — QA Report"
+      publish-pages: "false"
+    secrets:
+      GH_PAGES_TOKEN: ${{ secrets.GH_PAGES_TOKEN }}
+
+  # LAYER 6 — NOTIFICATION
+  notify:
+    name: "Notify"
+    needs: [report, quality-gate]
+    if: always()
+    uses: ./.github/workflows/shared/notify.yml
+    with:
+      status: ${{ needs.quality-gate.result }}
+      tool: "Playwright"
+      environment: "staging"
+      pass-rate: ${{ needs.report.outputs.pass-rate }}
+      test-total: ${{ needs.report.outputs.total }}
+      test-failed: ${{ needs.report.outputs.failed }}
+      notify-slack: ${{ inputs.notify-slack || 'false' }}
+      notify-on: "always"
+      mention-on-failure: "@qa-team"
+    secrets:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

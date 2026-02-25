@@ -1,0 +1,113 @@
+name: "UI Mobile — Appium + iOS"
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      ios-version:
+        description: "iOS version"
+        required: false
+        default: "17.0"
+      device:
+        description: "iPhone simulator"
+        required: false
+        default: "iPhone 15"
+      test-suite:
+        description: "Test suite"
+        required: false
+        default: "testng-ios.xml"
+
+env:
+  JAVA_VERSION: "17"
+  NODE_VERSION: "20"
+  IOS_VERSION: ${{ inputs.ios-version || '17.0' }}
+  DEVICE: ${{ inputs.device || 'iPhone 15' }}
+  TEST_SUITE: ${{ inputs.test-suite || 'testng-ios.xml' }}
+
+jobs:
+  ios-test:
+    name: "iOS — ${{ inputs.device || 'iPhone 15' }} / iOS ${{ inputs.ios-version || '17.0' }}"
+    runs-on: macos-latest   # ⚠️ iOS requires macOS runner
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: "maven"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Appium + XCUITest driver
+        run: |
+          npm install -g appium@latest
+          appium driver install xcuitest
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: List available simulators
+        run: xcrun simctl list devices available
+
+      - name: Boot iOS Simulator
+        run: |
+          UDID=$(xcrun simctl list devices available | \
+            grep "${{ env.DEVICE }}" | \
+            grep "iOS ${{ env.IOS_VERSION }}" | \
+            head -1 | \
+            grep -E '[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}' -o)
+          
+          if [ -z "$UDID" ]; then
+            echo "❌ Simulator not found: ${{ env.DEVICE }} iOS ${{ env.IOS_VERSION }}"
+            exit 1
+          fi
+          
+          echo "SIMULATOR_UDID=$UDID" >> $GITHUB_ENV
+          xcrun simctl boot "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+          echo "✅ Booted simulator: $UDID"
+
+      - name: Start Appium server
+        run: |
+          appium --address 127.0.0.1 --port 4723 --relaxed-security &
+          sleep 5
+          echo "✅ Appium server started"
+
+      - name: Run iOS tests
+        run: |
+          mvn test \
+            -DsuiteXmlFile=${{ env.TEST_SUITE }} \
+            -Dplatform=ios \
+            -DdeviceName="${{ env.DEVICE }}" \
+            -DplatformVersion="${{ env.IOS_VERSION }}" \
+            -DudID="${{ env.SIMULATOR_UDID }}" \
+            --no-transfer-progress
+        env:
+          APP_PATH: ${{ secrets.IOS_APP_PATH }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-results-${{ env.IOS_VERSION }}
+          path: |
+            target/surefire-reports/
+            target/screenshots/
+          retention-days: 7
+
+      - name: Generate summary
+        if: always()
+        run: |
+          echo "## 🍎 iOS Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Device | iOS Version | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| ${{ env.DEVICE }} | ${{ env.IOS_VERSION }} | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY

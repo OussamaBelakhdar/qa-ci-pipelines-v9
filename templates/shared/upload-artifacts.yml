@@ -1,0 +1,55 @@
+name: "Shared — Upload Artifacts"
+
+# Reusable workflow for standardized artifact upload
+# Usage:
+#   jobs:
+#     report:
+#       uses: your-org/qa-ci-pipelines/.github/workflows/templates/shared/upload-artifacts.yml@main
+#       with:
+#         artifact-name: cypress-results
+#         artifact-path: cypress/reports/
+#         retention-days: 14
+
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: "Name of the artifact"
+        required: true
+        type: string
+      artifact-path:
+        description: "Path(s) to upload"
+        required: true
+        type: string
+      retention-days:
+        description: "Artifact retention in days"
+        required: false
+        default: "7"
+        type: string
+      if-no-files-found:
+        description: "Behavior if no files found: error, warn, ignore"
+        required: false
+        default: "warn"
+        type: string
+
+jobs:
+  upload:
+    name: "Upload — ${{ inputs.artifact-name }}"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ${{ inputs.artifact-path }}
+          retention-days: ${{ inputs.retention-days }}
+          if-no-files-found: ${{ inputs.if-no-files-found }}
+
+      - name: Log artifact summary
+        run: |
+          echo "## 📦 Artifact Uploaded" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Name | ${{ inputs.artifact-name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Path | ${{ inputs.artifact-path }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Retention | ${{ inputs.retention-days }} days |" >> $GITHUB_STEP_SUMMARY

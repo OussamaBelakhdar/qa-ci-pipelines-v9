@@ -1,0 +1,141 @@
+name: "Performance — JMeter"
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 2 * * 0"   # Every Sunday at 2:00 AM UTC
+  workflow_dispatch:
+    inputs:
+      test-plan:
+        description: "JMeter test plan (.jmx)"
+        required: false
+        default: "tests/load-test.jmx"
+      threads:
+        description: "Number of virtual users"
+        required: false
+        default: "50"
+      duration:
+        description: "Test duration (seconds)"
+        required: false
+        default: "120"
+      ramp-up:
+        description: "Ramp-up period (seconds)"
+        required: false
+        default: "30"
+      environment:
+        description: "Target environment"
+        required: false
+        default: "staging"
+        type: choice
+        options: ["staging", "production"]
+
+env:
+  JMETER_VERSION: "5.6.3"
+  JAVA_VERSION: "17"
+  TEST_PLAN: ${{ inputs.test-plan || 'tests/load-test.jmx' }}
+  THREADS: ${{ inputs.threads || '50' }}
+  DURATION: ${{ inputs.duration || '120' }}
+  RAMP_UP: ${{ inputs.ramp-up || '30' }}
+  ENVIRONMENT: ${{ inputs.environment || 'staging' }}
+
+jobs:
+  performance-test:
+    name: "Load Test — ${{ inputs.threads || '50' }} users / ${{ inputs.duration || '120' }}s"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Cache JMeter installation
+        id: jmeter-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/jmeter
+          key: jmeter-${{ env.JMETER_VERSION }}-${{ runner.os }}
+
+      - name: Install JMeter
+        if: steps.jmeter-cache.outputs.cache-hit != 'true'
+        run: |
+          wget -q https://archive.apache.org/dist/jmeter/binaries/apache-jmeter-${{ env.JMETER_VERSION }}.tgz
+          tar -xzf apache-jmeter-${{ env.JMETER_VERSION }}.tgz
+          sudo mv apache-jmeter-${{ env.JMETER_VERSION }} /opt/jmeter
+          echo "/opt/jmeter/bin" >> $GITHUB_PATH
+
+      - name: Add JMeter to PATH
+        if: steps.jmeter-cache.outputs.cache-hit == 'true'
+        run: echo "/opt/jmeter/bin" >> $GITHUB_PATH
+
+      - name: Create results directory
+        run: mkdir -p results reports
+
+      - name: Run JMeter load test
+        run: |
+          jmeter \
+            -n \
+            -t ${{ env.TEST_PLAN }} \
+            -l results/results.jtl \
+            -e \
+            -o reports/html \
+            -Jthreads=${{ env.THREADS }} \
+            -Jduration=${{ env.DURATION }} \
+            -Jrampup=${{ env.RAMP_UP }} \
+            -Jbaseurl=${{ secrets.BASE_URL || 'https://staging.example.com' }} \
+            -Jenvironment=${{ env.ENVIRONMENT }}
+        env:
+          JVM_ARGS: "-Xms512m -Xmx2g"
+
+      - name: Parse results and validate thresholds
+        run: |
+          # Extract key metrics from JTL
+          TOTAL=$(grep -c "^[0-9]" results/results.jtl 2>/dev/null || echo "0")
+          ERRORS=$(grep -c ",false," results/results.jtl 2>/dev/null || echo "0")
+          
+          if [ "$TOTAL" -gt "0" ]; then
+            ERROR_RATE=$(echo "scale=2; $ERRORS * 100 / $TOTAL" | bc)
+            echo "Total requests: $TOTAL"
+            echo "Errors: $ERRORS"
+            echo "Error rate: $ERROR_RATE%"
+            
+            # Fail if error rate > 5%
+            if (( $(echo "$ERROR_RATE > 5" | bc -l) )); then
+              echo "❌ Error rate $ERROR_RATE% exceeds threshold of 5%"
+              exit 1
+            fi
+            echo "✅ Error rate $ERROR_RATE% is within threshold"
+          fi
+
+      - name: Upload JTL results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jmeter-jtl-${{ env.ENVIRONMENT }}
+          path: results/results.jtl
+          retention-days: 30
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jmeter-html-report-${{ env.ENVIRONMENT }}
+          path: reports/html/
+          retention-days: 30
+
+      - name: Generate summary
+        if: always()
+        run: |
+          echo "## 📊 JMeter Performance Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Virtual Users | ${{ env.THREADS }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Duration | ${{ env.DURATION }}s |" >> $GITHUB_STEP_SUMMARY
+          echo "| Ramp-up | ${{ env.RAMP_UP }}s |" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ env.ENVIRONMENT }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| JMeter Version | ${{ env.JMETER_VERSION }} |" >> $GITHUB_STEP_SUMMARY

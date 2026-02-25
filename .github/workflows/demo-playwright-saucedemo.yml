@@ -1,0 +1,392 @@
+name: "🎭 Demo — Playwright / Saucedemo"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LIVE DEMO — Real Playwright E2E tests against saucedemo.com
+# Self-contained: no external uses: dependencies.
+#
+# Tests covered:
+#   ✅ Auth    — login, locked user, invalid credentials, error dismiss
+#   ✅ Catalog — 6 products, 4 sort modes, product detail
+#   ✅ Cart    — add/remove, badge count, persistence
+#   ✅ Checkout— form validation, price math, order complete, post-checkout
+#
+# Browsers: Chromium, Firefox, WebKit — run in parallel
+# App under test: https://www.saucedemo.com
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "demo/playwright/**"
+      - "demo/package*.json"
+      - "demo/playwright.config.ts"
+      - "demo/tsconfig.json"
+      - ".github/workflows/demo-playwright-saucedemo.yml"
+  schedule:
+    - cron: "30 7 * * 1-5"   # Weekdays 07:30 UTC (30min after Cypress)
+  workflow_dispatch:
+    inputs:
+      browser:
+        description: "Browser project"
+        default: "all"
+        type: choice
+        options: [all, chromium, firefox, webkit]
+      notify-slack:
+        description: "Send Slack notification"
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+env:
+  NODE_VERSION: "20"
+  BASE_URL: "https://www.saucedemo.com"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# LAYER 1 — SETUP
+# ═════════════════════════════════════════════════════════════════════════════
+jobs:
+  setup:
+    name: "⚙️ Setup — Node 20 + Playwright"
+    runs-on: ubuntu-latest
+    outputs:
+      cache-key:    ${{ steps.cache-key.outputs.key }}
+      browser-arg:  ${{ steps.browser.outputs.arg }}
+      project-list: ${{ steps.browser.outputs.projects }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve browser selection
+        id: browser
+        run: |
+          INPUT="${{ inputs.browser }}"
+          BROWSER="${INPUT:-all}"
+          if [ "$BROWSER" = "all" ]; then
+            echo "arg=" >> $GITHUB_OUTPUT
+            echo "projects=chromium,firefox,webkit" >> $GITHUB_OUTPUT
+          else
+            echo "arg=--project=${BROWSER}" >> $GITHUB_OUTPUT
+            echo "projects=${BROWSER}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Compute cache key
+        id: cache-key
+        run: |
+          echo "key=playwright-demo-${{ runner.os }}-node20-${{ hashFiles('demo/package-lock.json','demo/package.json') }}" >> $GITHUB_OUTPUT
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: demo/package-lock.json
+
+      - name: Install dependencies
+        working-directory: demo
+        run: npm ci
+
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ steps.cache-key.outputs.key }}
+          restore-keys: |
+            playwright-demo-${{ runner.os }}-node20-
+
+      - name: Install Playwright browsers
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        working-directory: demo
+        run: npx playwright install --with-deps chromium firefox webkit
+
+      - name: Install browser system deps (cache hit)
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        working-directory: demo
+        run: npx playwright install-deps chromium firefox webkit
+
+      - name: Print environment
+        run: |
+          echo "## ⚙️ Setup" >> $GITHUB_STEP_SUMMARY
+          echo "| | |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Node | $(node -v) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Playwright | $(cd demo && npx playwright --version) |" >> $GITHUB_STEP_SUMMARY
+          echo "| Browsers | ${{ steps.browser.outputs.projects }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Target | ${{ env.BASE_URL }} |" >> $GITHUB_STEP_SUMMARY
+
+# ═════════════════════════════════════════════════════════════════════════════
+# LAYER 2 — TEST (3 browsers in parallel via matrix)
+# ═════════════════════════════════════════════════════════════════════════════
+  test:
+    name: "🧪 Tests — ${{ matrix.browser }}"
+    runs-on: ubuntu-latest
+    needs: setup
+    fail-fast: false
+    strategy:
+      matrix:
+        browser: [chromium, firefox, webkit]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: demo/package-lock.json
+
+      - name: Restore Playwright cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ needs.setup.outputs.cache-key }}
+
+      - name: Install dependencies
+        working-directory: demo
+        run: npm ci
+
+      - name: Install browser system deps
+        working-directory: demo
+        run: npx playwright install-deps ${{ matrix.browser }}
+
+      - name: Run Playwright — ${{ matrix.browser }}
+        working-directory: demo
+        run: |
+          # Skip browser if not in selection
+          PROJECTS="${{ needs.setup.outputs.project-list }}"
+          if ! echo "$PROJECTS" | grep -q "${{ matrix.browser }}"; then
+            echo "⏭️  Skipping ${{ matrix.browser }} (not in selection: $PROJECTS)"
+            exit 0
+          fi
+
+          npx playwright test \
+            --project=${{ matrix.browser }} \
+            --reporter=list
+        env:
+          PW_REPORT_FILE: "playwright-report/results-${{ matrix.browser }}.json"
+          BASE_URL: ${{ env.BASE_URL }}
+
+      - name: Upload JSON results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results-${{ matrix.browser }}
+          path: demo/playwright-report/results-${{ matrix.browser }}.json
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-html-${{ matrix.browser }}
+          path: demo/playwright-report/
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Upload test results (traces/screenshots)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces-${{ matrix.browser }}
+          path: demo/test-results/
+          retention-days: 14
+          if-no-files-found: warn
+
+# ═════════════════════════════════════════════════════════════════════════════
+# LAYER 3 — REPORT: merge browsers → metrics
+# ═════════════════════════════════════════════════════════════════════════════
+  report:
+    name: "📊 Report — Merge & Metrics"
+    runs-on: ubuntu-latest
+    needs: test
+    if: always()
+    outputs:
+      pass-rate: ${{ steps.metrics.outputs.pass_rate }}
+      total:     ${{ steps.metrics.outputs.total }}
+      passed:    ${{ steps.metrics.outputs.passed }}
+      failed:    ${{ steps.metrics.outputs.failed }}
+    steps:
+      - name: Download all JSON results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: playwright-results-*
+          merge-multiple: true
+          path: playwright-results
+
+      - name: Parse metrics from Playwright JSON
+        id: metrics
+        run: |
+          python3 << 'PYEOF'
+          import json, glob, os
+
+          total = passed = failed = skipped = 0
+
+          for f in glob.glob('playwright-results/*.json'):
+              try:
+                  d = json.load(open(f))
+                  # Playwright JSON: suites -> specs -> tests -> results
+                  for suite in d.get('suites', []):
+                      for spec in suite.get('suites', []):
+                          for test in spec.get('tests', []):
+                              status = test.get('status', '')
+                              total += 1
+                              if status == 'passed':
+                                  passed += 1
+                              elif status in ('failed', 'timedOut', 'interrupted'):
+                                  failed += 1
+                              else:
+                                  skipped += 1
+              except Exception as e:
+                  print(f"Warning: could not parse {f}: {e}")
+
+          rate = round(passed / total * 100, 2) if total > 0 else 0.0
+
+          os.makedirs("qa-metrics", exist_ok=True)
+          with open("qa-metrics/metrics.json", "w") as f:
+              json.dump({
+                  "tool": "playwright",
+                  "total": total, "passed": passed, "failed": failed,
+                  "skipped": skipped, "flaky_count": 0, "pass_rate": rate
+              }, f, indent=2)
+
+          print(f"Total={total} | Passed={passed} | Failed={failed} | Skipped={skipped} | Rate={rate}%")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"total={total}\npassed={passed}\nfailed={failed}\npass_rate={rate}\n")
+          PYEOF
+
+      - name: Upload qa-metrics artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-metrics-playwright
+          path: qa-metrics/metrics.json
+          retention-days: 7
+
+      - name: Generate Step Summary
+        run: |
+          TOTAL="${{ steps.metrics.outputs.total }}"
+          PASSED="${{ steps.metrics.outputs.passed }}"
+          FAILED="${{ steps.metrics.outputs.failed }}"
+          RATE="${{ steps.metrics.outputs.pass_rate }}"
+          ICON=$([ "$FAILED" = "0" ] && echo "✅" || echo "❌")
+
+          echo "## $ICON Playwright — Saucedemo Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| ✅ Passed | $PASSED |" >> $GITHUB_STEP_SUMMARY
+          echo "| ❌ Failed | $FAILED |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📊 Total | $TOTAL |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🎯 Pass rate | **${RATE}%** |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🌐 Browsers | chromium · firefox · webkit |" >> $GITHUB_STEP_SUMMARY
+          echo "| 🌍 Target | ${{ env.BASE_URL }} |" >> $GITHUB_STEP_SUMMARY
+
+# ═════════════════════════════════════════════════════════════════════════════
+# LAYER 4 — QUALITY GATE (inlined)
+# ═════════════════════════════════════════════════════════════════════════════
+  quality-gate:
+    name: "🚦 Quality Gate"
+    runs-on: ubuntu-latest
+    needs: report
+    if: always() && needs.report.result == 'success'
+    steps:
+      - name: Download qa-metrics
+        uses: actions/download-artifact@v4
+        with:
+          name: qa-metrics-playwright
+          path: qa-metrics
+
+      - name: Evaluate thresholds
+        run: |
+          python3 << 'PYEOF'
+          import json, sys, os
+
+          MIN_PASS_RATE = 95.0
+          MAX_FLAKY     = 5
+
+          with open("qa-metrics/metrics.json") as f:
+              m = json.load(f)
+
+          total     = m.get("total", 0)
+          passed    = m.get("passed", 0)
+          failed    = m.get("failed", 0)
+          flaky     = m.get("flaky_count", 0)
+          pass_rate = m.get("pass_rate", 0.0)
+
+          violations = []
+          if pass_rate < MIN_PASS_RATE:
+              violations.append(f"Pass rate {pass_rate}% < required {MIN_PASS_RATE}%")
+          if flaky > MAX_FLAKY:
+              violations.append(f"Flaky tests {flaky} > max {MAX_FLAKY}")
+
+          print(f"{'='*50}")
+          print(f"  QUALITY GATE — playwright")
+          print(f"{'='*50}")
+          print(f"  Total:     {total}")
+          print(f"  Passed:    {passed}")
+          print(f"  Failed:    {failed}")
+          print(f"  Pass rate: {pass_rate}%  (threshold: ≥{MIN_PASS_RATE}%)")
+          print(f"  Flaky:     {flaky}  (threshold: ≤{MAX_FLAKY})")
+          print(f"{'='*50}")
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as s:
+              icon = "✅" if not violations else "❌"
+              s.write(f"\n## {icon} Quality Gate\n\n")
+              s.write("| Metric | Value | Threshold | Status |\n")
+              s.write("|--------|-------|-----------|--------|\n")
+              s.write(f"| Pass rate | {pass_rate}% | ≥{MIN_PASS_RATE}% | {'✅' if pass_rate >= MIN_PASS_RATE else '❌'} |\n")
+              s.write(f"| Flaky tests | {flaky} | ≤{MAX_FLAKY} | {'✅' if flaky <= MAX_FLAKY else '❌'} |\n")
+
+          if violations:
+              print(f"\n❌ GATE FAILED: {len(violations)} violation(s)")
+              for v in violations:
+                  print(f"   • {v}")
+              sys.exit(1)
+          else:
+              print("\n✅ GATE PASSED — all thresholds met")
+          PYEOF
+
+# ═════════════════════════════════════════════════════════════════════════════
+# LAYER 5 — NOTIFY (optional)
+# ═════════════════════════════════════════════════════════════════════════════
+  notify:
+    name: "📣 Notify"
+    runs-on: ubuntu-latest
+    needs: [report, quality-gate]
+    if: always() && inputs.notify-slack == 'true'
+    steps:
+      - name: Send Slack notification
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          STATUS="${{ needs.quality-gate.result }}"
+          RATE="${{ needs.report.outputs.pass-rate }}"
+          TOTAL="${{ needs.report.outputs.total }}"
+          FAILED="${{ needs.report.outputs.failed }}"
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          [ "$STATUS" = "success" ] && COLOR="#36a64f" && EMOJI="✅" || COLOR="#d32f2f" && EMOJI="❌"
+
+          curl -s -o /dev/null -w "%{http_code}" -X POST \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"attachments\": [{
+                \"color\": \"$COLOR\",
+                \"blocks\": [
+                  {\"type\": \"header\", \"text\": {\"type\": \"plain_text\", \"text\": \"$EMOJI Playwright — Saucedemo — $STATUS\"}},
+                  {\"type\": \"section\", \"fields\": [
+                    {\"type\": \"mrkdwn\", \"text\": \"*Pass rate*\n${RATE}%\"},
+                    {\"type\": \"mrkdwn\", \"text\": \"*Tests*\n$TOTAL total / $FAILED failed\"},
+                    {\"type\": \"mrkdwn\", \"text\": \"*Browsers*\nChromium · Firefox · WebKit\"},
+                    {\"type\": \"mrkdwn\", \"text\": \"*Branch*\n${{ github.ref_name }}\"}
+                  ]},
+                  {\"type\": \"actions\", \"elements\": [
+                    {\"type\": \"button\", \"text\": {\"type\": \"plain_text\", \"text\": \"View Run\"}, \"url\": \"$RUN_URL\", \"style\": \"primary\"}
+                  ]}
+                ]
+              }]
+            }" \
+            "$SLACK_WEBHOOK_URL"

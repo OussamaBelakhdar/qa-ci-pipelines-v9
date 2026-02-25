@@ -1,0 +1,27 @@
+{
+  "standard": {
+    "username": "standard_user",
+    "password": "secret_sauce",
+    "description": "Normal user — all features work"
+  },
+  "locked": {
+    "username": "locked_out_user",
+    "password": "secret_sauce",
+    "description": "Locked account — cannot log in"
+  },
+  "problem": {
+    "username": "problem_user",
+    "password": "secret_sauce",
+    "description": "Problem user — UI has intentional bugs"
+  },
+  "performance": {
+    "username": "performance_glitch_user",
+    "password": "secret_sauce",
+    "description": "Performance user — slow page loads"
+  },
+  "invalid": {
+    "username": "not_a_user",
+    "password": "wrong_password",
+    "description": "Invalid credentials — login fails"
+  }
+}

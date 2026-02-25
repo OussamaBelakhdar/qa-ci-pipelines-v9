@@ -1,0 +1,244 @@
+name: "Shared — Allure Report"
+
+# Reusable workflow: download test results, generate Allure report, publish to GitHub Pages.
+#
+# Compatible tools (pass allure-results artifacts from any of these):
+#   Cypress · Playwright · Selenium · Karate · REST-Assured · JMeter · Robot Framework
+#
+# Usage in your pipeline:
+#
+#   jobs:
+#     allure:
+#       needs: [test]
+#       uses: your-org/qa-ci-pipelines/.github/workflows/templates/shared/allure-report.yml@main
+#       with:
+#         artifact-pattern: 'allure-results-*'
+#         report-title: 'My Project — QA Report'
+#         publish-pages: true
+#       secrets:
+#         GH_PAGES_TOKEN: ${{ secrets.GH_PAGES_TOKEN }}
+
+on:
+  workflow_call:
+    inputs:
+      artifact-pattern:
+        description: "Pattern to match test result artifacts (e.g. allure-results-*)"
+        required: false
+        default: "allure-results-*"
+        type: string
+      report-title:
+        description: "Title displayed in the Allure report header"
+        required: false
+        default: "QA Test Report"
+        type: string
+      allure-version:
+        description: "Allure CLI version to install"
+        required: false
+        default: "2.27.0"
+        type: string
+      publish-pages:
+        description: "Publish report to GitHub Pages"
+        required: false
+        default: "false"
+        type: string
+      retention-days:
+        description: "Artifact retention in days"
+        required: false
+        default: "30"
+        type: string
+      history-artifact:
+        description: "Artifact name containing previous run history (for trends)"
+        required: false
+        default: "allure-history"
+        type: string
+    outputs:
+      report-url:
+        description: "URL of the published Allure report (if pages enabled)"
+        value: ${{ jobs.generate-allure.outputs.report-url }}
+    secrets:
+      GH_PAGES_TOKEN:
+        required: false
+
+jobs:
+  generate-allure:
+    name: "Allure — Generate & Publish"
+    runs-on: ubuntu-latest
+    outputs:
+      report-url: ${{ steps.pages-url.outputs.url }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Download all test results artifacts ──────────────────────────────────
+      - name: Download test results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ inputs.artifact-pattern }}
+          merge-multiple: true
+          path: allure-results
+
+      - name: Check results exist
+        run: |
+          COUNT=$(find allure-results -name "*.json" -o -name "*.xml" 2>/dev/null | wc -l)
+          echo "📊 Found $COUNT result files"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "⚠️ No result files found matching pattern: ${{ inputs.artifact-pattern }}"
+            echo "Expected files: allure-results/*.json or *.xml"
+          fi
+
+      # ── Restore history for trend graphs ─────────────────────────────────────
+      - name: Restore Allure history
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: ${{ inputs.history-artifact }}
+          path: allure-results/history
+
+      # ── Install Allure CLI ────────────────────────────────────────────────────
+      - name: Cache Allure CLI
+        id: allure-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.allure
+          key: allure-${{ inputs.allure-version }}-${{ runner.os }}
+
+      - name: Install Allure CLI
+        if: steps.allure-cache.outputs.cache-hit != 'true'
+        run: |
+          wget -q https://github.com/allure-framework/allure2/releases/download/${{ inputs.allure-version }}/allure-${{ inputs.allure-version }}.tgz
+          tar -xzf allure-${{ inputs.allure-version }}.tgz
+          mkdir -p ~/.allure
+          mv allure-${{ inputs.allure-version }} ~/.allure/allure
+          echo "Allure ${{ inputs.allure-version }} installed"
+
+      - name: Add Allure to PATH
+        run: echo "$HOME/.allure/allure/bin" >> $GITHUB_PATH
+
+      # ── Configure report metadata ─────────────────────────────────────────────
+      - name: Configure Allure environment
+        run: |
+          mkdir -p allure-results
+          cat > allure-results/environment.properties << EOF
+          Repository=${{ github.repository }}
+          Branch=${{ github.ref_name }}
+          Commit=${{ github.sha }}
+          Run_ID=${{ github.run_id }}
+          Triggered_by=${{ github.actor }}
+          Runner_OS=${{ runner.os }}
+          EOF
+
+      - name: Configure Allure executor
+        run: |
+          cat > allure-results/executor.json << EOF
+          {
+            "name": "GitHub Actions",
+            "type": "github",
+            "url": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+            "buildOrder": ${{ github.run_number }},
+            "buildName": "Run #${{ github.run_number }}",
+            "buildUrl": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}",
+            "reportUrl": "",
+            "reportName": "${{ inputs.report-title }}"
+          }
+          EOF
+
+      # ── Generate Allure HTML report ───────────────────────────────────────────
+      - name: Generate Allure report
+        run: |
+          allure generate allure-results \
+            --output allure-report \
+            --clean \
+            --name "${{ inputs.report-title }}"
+
+      # ── Save history for next run ─────────────────────────────────────────────
+      - name: Save Allure history
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.history-artifact }}
+          path: allure-report/history
+          retention-days: 90
+
+      # ── Upload report artifact ────────────────────────────────────────────────
+      - name: Upload Allure report
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-report-${{ github.run_number }}
+          path: allure-report/
+          retention-days: ${{ inputs.retention-days }}
+
+      # ── Publish to GitHub Pages (optional) ───────────────────────────────────
+      - name: Deploy to GitHub Pages
+        if: inputs.publish-pages == 'true'
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GH_PAGES_TOKEN || secrets.GITHUB_TOKEN }}
+          publish_dir: allure-report
+          destination_dir: reports/${{ github.run_number }}
+          keep_files: true
+
+      - name: Get Pages URL
+        id: pages-url
+        if: inputs.publish-pages == 'true'
+        run: |
+          REPO="${{ github.repository }}"
+          OWNER="${REPO%%/*}"
+          REPO_NAME="${REPO##*/}"
+          URL="https://${OWNER}.github.io/${REPO_NAME}/reports/${{ github.run_number }}"
+          echo "url=$URL" >> $GITHUB_OUTPUT
+          echo "📄 Report URL: $URL"
+
+      # ── Parse summary metrics ─────────────────────────────────────────────────
+      - name: Parse Allure summary
+        id: allure-summary
+        run: |
+          SUMMARY_FILE="allure-report/widgets/summary.json"
+          if [ -f "$SUMMARY_FILE" ]; then
+            python3 -c "
+          import json
+          with open('$SUMMARY_FILE') as f:
+              data = json.load(f)
+          stats = data.get('statistic', {})
+          total   = stats.get('total', 0)
+          passed  = stats.get('passed', 0)
+          failed  = stats.get('failed', 0)
+          broken  = stats.get('broken', 0)
+          skipped = stats.get('skipped', 0)
+          rate    = round(passed / total * 100, 1) if total > 0 else 0
+          
+          print(f'ALLURE_TOTAL={total}')
+          print(f'ALLURE_PASSED={passed}')
+          print(f'ALLURE_FAILED={failed}')
+          print(f'ALLURE_BROKEN={broken}')
+          print(f'ALLURE_SKIPPED={skipped}')
+          print(f'ALLURE_PASS_RATE={rate}')
+            " >> $GITHUB_ENV
+          fi
+
+      - name: Generate GitHub Step Summary
+        run: |
+          echo "## 📊 Allure Report — ${{ inputs.report-title }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -n "$ALLURE_TOTAL" ]; then
+            echo "| Status | Count |" >> $GITHUB_STEP_SUMMARY
+            echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+            echo "| ✅ Passed | $ALLURE_PASSED |" >> $GITHUB_STEP_SUMMARY
+            echo "| ❌ Failed | $ALLURE_FAILED |" >> $GITHUB_STEP_SUMMARY
+            echo "| 💥 Broken | $ALLURE_BROKEN |" >> $GITHUB_STEP_SUMMARY
+            echo "| ⏭️ Skipped | $ALLURE_SKIPPED |" >> $GITHUB_STEP_SUMMARY
+            echo "| **Total** | **$ALLURE_TOTAL** |" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Pass rate: $ALLURE_PASS_RATE%**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Info | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Run # | ${{ github.run_number }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Branch | ${{ github.ref_name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ inputs.publish-pages }}" = "true" ] && [ -n "${{ steps.pages-url.outputs.url }}" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "🔗 [Open Allure Report](${{ steps.pages-url.outputs.url }})" >> $GITHUB_STEP_SUMMARY
+          fi

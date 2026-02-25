@@ -1,0 +1,72 @@
+name: "Shared — Parallel Matrix"
+
+# Reusable workflow for multi-browser / multi-version parallel execution
+# Usage:
+#   jobs:
+#     test:
+#       uses: your-org/qa-ci-pipelines/.github/workflows/templates/shared/parallel-matrix.yml@main
+#       with:
+#         browsers: '["chrome","firefox","edge"]'
+#         node-versions: '["18","20"]'
+
+on:
+  workflow_call:
+    inputs:
+      browsers:
+        description: "JSON array of browsers"
+        required: false
+        default: '["chrome"]'
+        type: string
+      node-versions:
+        description: "JSON array of Node versions"
+        required: false
+        default: '["20"]'
+        type: string
+      os:
+        description: "JSON array of OS"
+        required: false
+        default: '["ubuntu-latest"]'
+        type: string
+      fail-fast:
+        description: "Stop all matrix jobs on first failure"
+        required: false
+        default: "false"
+        type: string
+      tool:
+        description: "Tool being tested (for labeling)"
+        required: false
+        default: "test"
+        type: string
+
+jobs:
+  matrix-run:
+    name: "${{ inputs.tool }} — ${{ matrix.browser }} / Node ${{ matrix.node }} / ${{ matrix.os }}"
+    runs-on: ${{ matrix.os }}
+    fail-fast: ${{ inputs.fail-fast == 'true' }}
+    strategy:
+      matrix:
+        browser: ${{ fromJson(inputs.browsers) }}
+        node: ${{ fromJson(inputs.node-versions) }}
+        os: ${{ fromJson(inputs.os) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: "npm"
+
+      - name: Log matrix context
+        run: |
+          echo "Running matrix combination:"
+          echo "  OS: ${{ matrix.os }}"
+          echo "  Browser: ${{ matrix.browser }}"
+          echo "  Node: ${{ matrix.node }}"
+          echo "  Tool: ${{ inputs.tool }}"
+
+      - name: Generate matrix summary
+        if: always()
+        run: |
+          echo "| ${{ inputs.tool }} | ${{ matrix.browser }} | Node ${{ matrix.node }} | ${{ matrix.os }} | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,209 @@
+name: "Shared — Docker Runner"
+
+# Reusable workflow: runs QA tests inside a Docker container for total isolation.
+# Supports custom images, registry auth, and volume mounting.
+#
+# Benefits:
+#   - 100% reproducible environment (same image locally and in CI)
+#   - No "works on my machine" issues
+#   - Pinned dependency versions via image tag
+#   - Supports private registries (ECR, GHCR, Docker Hub)
+#
+# Usage:
+#
+#   jobs:
+#     test:
+#       uses: your-org/qa-ci-pipelines/.github/workflows/templates/shared/docker-runner.yml@main
+#       with:
+#         image: 'cypress/included:13.6.0'
+#         test-command: 'npx cypress run --browser chrome'
+#         tool: 'cypress'
+#         environment: 'staging'
+#       secrets:
+#         REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+#         REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+#         BASE_URL: ${{ secrets.BASE_URL }}
+
+on:
+  workflow_call:
+    inputs:
+      # ── Docker image ──────────────────────────────────────────────────────────
+      image:
+        description: "Docker image to run tests in (e.g. cypress/included:13.6.0)"
+        required: true
+        type: string
+      registry:
+        description: "Container registry (default: docker.io). Use ghcr.io for GHCR."
+        required: false
+        default: "docker.io"
+        type: string
+      # ── Test execution ────────────────────────────────────────────────────────
+      test-command:
+        description: "Command to run inside the container"
+        required: true
+        type: string
+      working-directory:
+        description: "Working directory inside the container"
+        required: false
+        default: "/app"
+        type: string
+      # ── Context ──────────────────────────────────────────────────────────────
+      tool:
+        description: "Tool name (for labeling artifacts and summaries)"
+        required: false
+        default: "qa"
+        type: string
+      environment:
+        description: "Target environment"
+        required: false
+        default: "staging"
+        type: string
+      # ── Artifacts ────────────────────────────────────────────────────────────
+      results-path:
+        description: "Path inside container where results are written"
+        required: false
+        default: "/app/test-results"
+        type: string
+      reports-path:
+        description: "Path inside container where HTML reports are written"
+        required: false
+        default: "/app/reports"
+        type: string
+      retention-days:
+        description: "Artifact retention in days"
+        required: false
+        default: "14"
+        type: string
+      # ── Docker options ────────────────────────────────────────────────────────
+      docker-options:
+        description: "Extra docker run options (e.g. --memory=2g --cpus=2)"
+        required: false
+        default: "--shm-size=2g"
+        type: string
+    secrets:
+      REGISTRY_USERNAME:
+        required: false
+      REGISTRY_TOKEN:
+        required: false
+      BASE_URL:
+        required: false
+      API_KEY:
+        required: false
+
+jobs:
+  docker-run:
+    name: "Docker — ${{ inputs.tool }} / ${{ inputs.environment }}"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── Registry login (optional) ─────────────────────────────────────────────
+      - name: Login to container registry
+        if: env.REGISTRY_USERNAME != '' && env.REGISTRY_TOKEN != ''
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+
+      # ── Pull image with retry ─────────────────────────────────────────────────
+      - name: Pull Docker image
+        run: |
+          IMAGE="${{ inputs.image }}"
+          echo "🐳 Pulling: $IMAGE"
+          for i in 1 2 3; do
+            docker pull "$IMAGE" && break
+            echo "Pull attempt $i failed, retrying..."
+            sleep 5
+          done
+
+      - name: Inspect image
+        run: |
+          docker inspect "${{ inputs.image }}" \
+            --format='Image: {{.Id}}\nCreated: {{.Created}}\nOS: {{.Os}}/{{.Architecture}}'
+
+      # ── Prepare host directories ──────────────────────────────────────────────
+      - name: Create output directories
+        run: |
+          mkdir -p ./docker-results ./docker-reports ./docker-allure-results
+
+      # ── Run tests in container ────────────────────────────────────────────────
+      - name: Run tests in Docker container
+        run: |
+          docker run \
+            --rm \
+            ${{ inputs.docker-options }} \
+            -v "${{ github.workspace }}:${{ inputs.working-directory }}" \
+            -v "${{ github.workspace }}/docker-results:${{ inputs.results-path }}" \
+            -v "${{ github.workspace }}/docker-reports:${{ inputs.reports-path }}" \
+            -w "${{ inputs.working-directory }}" \
+            -e BASE_URL="${{ secrets.BASE_URL }}" \
+            -e API_KEY="${{ secrets.API_KEY }}" \
+            -e CI=true \
+            -e ENVIRONMENT="${{ inputs.environment }}" \
+            "${{ inputs.image }}" \
+            /bin/bash -c "${{ inputs.test-command }}"
+
+      # ── Collect allure results (if present) ───────────────────────────────────
+      - name: Copy Allure results from container output
+        if: always()
+        run: |
+          # Look for allure-results directory in common locations
+          ALLURE_CANDIDATES=(
+            "${{ github.workspace }}/allure-results"
+            "${{ github.workspace }}/docker-results/allure-results"
+            "${{ github.workspace }}/docker-results"
+          )
+          for dir in "${ALLURE_CANDIDATES[@]}"; do
+            if [ -d "$dir" ] && find "$dir" -name "*.json" | grep -q .; then
+              echo "✅ Allure results found at: $dir"
+              cp -r "$dir"/* ./docker-allure-results/ 2>/dev/null || true
+              break
+            fi
+          done
+
+      # ── Upload artifacts ──────────────────────────────────────────────────────
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-results-${{ inputs.tool }}-${{ inputs.environment }}
+          path: docker-results/
+          retention-days: ${{ inputs.retention-days }}
+          if-no-files-found: warn
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-reports-${{ inputs.tool }}-${{ inputs.environment }}
+          path: docker-reports/
+          retention-days: ${{ inputs.retention-days }}
+          if-no-files-found: warn
+
+      - name: Upload Allure results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-results-${{ inputs.tool }}-${{ inputs.environment }}
+          path: docker-allure-results/
+          retention-days: ${{ inputs.retention-days }}
+          if-no-files-found: warn
+
+      - name: Generate summary
+        if: always()
+        run: |
+          echo "## 🐳 Docker Run Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | \`${{ inputs.image }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tool | ${{ inputs.tool }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ inputs.environment }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Command | \`${{ inputs.test-command }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Working dir | ${{ inputs.working-directory }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,277 @@
+name: "API — Postman / Newman"
+
+# ─── CHANGELOG ─────────────────────────────────────────────────────────────
+# v2.0 — Added: qa-metrics artifact, Allure results, Quality Gate, Notify.
+# v1.0 — Initial template: Newman run with htmlextra + JUnit reporters.
+# ───────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    - cron: "0 6 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: false
+        default: "staging"
+        type: choice
+        options: ["dev", "staging", "production"]
+      collection:
+        description: "Collection file path"
+        required: false
+        default: "collections/main.postman_collection.json"
+      bail:
+        description: "Stop on first failure"
+        required: false
+        default: "false"
+        type: boolean
+      notify-slack:
+        description: "Send Slack notification"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+env:
+  NODE_VERSION: "20"
+  ENVIRONMENT: ${{ inputs.environment || 'staging' }}
+  COLLECTION: ${{ inputs.collection || 'collections/main.postman_collection.json' }}
+  BAIL: ${{ inputs.bail || 'false' }}
+
+jobs:
+  # LAYER 1 — SETUP
+  setup:
+    name: "Setup — Newman"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install Newman and reporters
+        run: |
+          npm install -g newman \
+            newman-reporter-htmlextra \
+            newman-reporter-junit \
+            newman-reporter-allure
+
+      - name: Validate collection exists
+        run: |
+          if [ ! -f "${{ env.COLLECTION }}" ]; then
+            echo "❌ Collection not found: ${{ env.COLLECTION }}"
+            exit 1
+          fi
+          echo "✅ Collection found: ${{ env.COLLECTION }}"
+
+  # LAYER 2 — TEST
+  test:
+    name: "Tests — ${{ inputs.environment || 'staging' }}"
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Newman
+        run: |
+          npm install -g newman \
+            newman-reporter-htmlextra \
+            newman-reporter-junit \
+            newman-reporter-allure
+
+      - name: Run Newman collection
+        run: |
+          BAIL_FLAG=""
+          [ "${{ env.BAIL }}" = "true" ] && BAIL_FLAG="--bail"
+
+          newman run ${{ env.COLLECTION }} \
+            --environment environments/${{ env.ENVIRONMENT }}.postman_environment.json \
+            --reporters cli,htmlextra,junit,allure \
+            --reporter-htmlextra-export reports/newman-report.html \
+            --reporter-junit-export reports/newman-results.xml \
+            --reporter-allure-export allure-results \
+            --color on \
+            $BAIL_FLAG
+        env:
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          API_KEY: ${{ secrets.API_KEY }}
+          AUTH_TOKEN: ${{ secrets.AUTH_TOKEN }}
+
+      - name: Upload Allure results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-results-newman-${{ env.ENVIRONMENT }}
+          path: allure-results/
+          retention-days: 3
+          if-no-files-found: warn
+
+      - name: Upload HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: newman-html-report-${{ env.ENVIRONMENT }}
+          path: reports/newman-report.html
+          retention-days: 14
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: newman-junit-${{ env.ENVIRONMENT }}
+          path: reports/newman-results.xml
+          retention-days: 7
+
+  # LAYER 3 — REPORT: parse JUnit + produce qa-metrics
+  report:
+    name: "Report — Metrics"
+    runs-on: ubuntu-latest
+    needs: test
+    if: always()
+    outputs:
+      pass-rate: ${{ steps.metrics.outputs.pass_rate }}
+      total: ${{ steps.metrics.outputs.total }}
+      failed: ${{ steps.metrics.outputs.failed }}
+    steps:
+      - name: Download JUnit results
+        uses: actions/download-artifact@v4
+        with:
+          name: newman-junit-${{ env.ENVIRONMENT }}
+          path: junit-results
+
+      - name: Download Allure results
+        uses: actions/download-artifact@v4
+        with:
+          name: allure-results-newman-${{ env.ENVIRONMENT }}
+          path: allure-results
+
+      - name: Parse JUnit metrics
+        id: metrics
+        run: |
+          python3 << 'PYEOF'
+          import xml.etree.ElementTree as ET
+          import json, os, glob
+
+          total=passed=failed=errors=skipped=0
+
+          for f in glob.glob('junit-results/**/*.xml', recursive=True):
+              try:
+                  tree = ET.parse(f)
+                  root = tree.getroot()
+                  suites = root.findall('testsuite') or [root]
+                  for suite in suites:
+                      total   += int(suite.get('tests', 0))
+                      failed  += int(suite.get('failures', 0))
+                      errors  += int(suite.get('errors', 0))
+                      skipped += int(suite.get('skipped', 0))
+              except Exception as e:
+                  print(f"Warning: {f}: {e}")
+
+          failed_total = failed + errors
+          passed = total - failed_total - skipped
+          rate = round(passed / total * 100, 2) if total > 0 else 0.0
+
+          os.makedirs("qa-metrics", exist_ok=True)
+          with open("qa-metrics/metrics.json", "w") as f:
+              json.dump({
+                  "tool": "newman",
+                  "total": total, "passed": passed,
+                  "failed": failed_total, "skipped": skipped,
+                  "flaky_count": 0, "pass_rate": rate
+              }, f, indent=2)
+
+          print(f"Total: {total} | Passed: {passed} | Failed: {failed_total} | Rate: {rate}%")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"pass_rate={rate}\n")
+              out.write(f"total={total}\n")
+              out.write(f"failed={failed_total}\n")
+          PYEOF
+
+      - name: Upload qa-metrics
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-metrics
+          path: qa-metrics/metrics.json
+          retention-days: 7
+
+      - name: Upload merged Allure results
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-results-newman
+          path: allure-results/
+          retention-days: 7
+
+      - name: Publish JUnit results
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: Newman API Tests — ${{ env.ENVIRONMENT }}
+          path: junit-results/**/*.xml
+          reporter: java-junit
+
+      - name: Generate summary
+        run: |
+          echo "## 📮 Newman API Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Environment | ${{ env.ENVIRONMENT }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Collection | ${{ env.COLLECTION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | ${{ needs.test.result }} |" >> $GITHUB_STEP_SUMMARY
+
+  # LAYER 4 — QUALITY GATE
+  quality-gate:
+    name: "Quality Gate"
+    needs: [report]
+    if: always() && needs.report.result == 'success'
+    uses: ./.github/workflows/shared/quality-gate.yml
+    with:
+      min-pass-rate: "100"
+      max-flaky-count: "0"
+      block-on-failure: "true"
+      metrics-artifact: "qa-metrics"
+
+  # LAYER 5 — ALLURE REPORT
+  allure:
+    name: "Allure Report"
+    needs: [report]
+    if: always() && needs.report.result != 'skipped'
+    uses: ./.github/workflows/shared/allure-report.yml
+    with:
+      artifact-pattern: "allure-results-newman"
+      report-title: "Newman API — QA Report"
+      publish-pages: "false"
+    secrets:
+      GH_PAGES_TOKEN: ${{ secrets.GH_PAGES_TOKEN }}
+
+  # LAYER 6 — NOTIFICATION
+  notify:
+    name: "Notify"
+    needs: [report, quality-gate]
+    if: always()
+    uses: ./.github/workflows/shared/notify.yml
+    with:
+      status: ${{ needs.quality-gate.result }}
+      tool: "Newman"
+      environment: ${{ inputs.environment || 'staging' }}
+      pass-rate: ${{ needs.report.outputs.pass-rate }}
+      test-total: ${{ needs.report.outputs.total }}
+      test-failed: ${{ needs.report.outputs.failed }}
+      notify-slack: ${{ inputs.notify-slack || 'false' }}
+      notify-on: "failure-only"
+    secrets:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

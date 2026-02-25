@@ -1,0 +1,133 @@
+name: "UI Web — Selenium + Java"
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      java-version:
+        description: "Java version"
+        required: false
+        default: "17"
+        type: choice
+        options: ["11", "17", "21"]
+      browser:
+        description: "Browser"
+        required: false
+        default: "chrome"
+        type: choice
+        options: ["chrome", "firefox", "edge"]
+      test-suite:
+        description: "TestNG suite file (e.g. testng.xml)"
+        required: false
+        default: "testng.xml"
+
+env:
+  JAVA_VERSION: ${{ inputs.java-version || '17' }}
+  BROWSER: ${{ inputs.browser || 'chrome' }}
+  TEST_SUITE: ${{ inputs.test-suite || 'testng.xml' }}
+
+jobs:
+  setup:
+    name: "Setup — Java ${{ inputs.java-version || '17' }}"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: "maven"
+
+      - name: Cache Maven dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: maven-${{ runner.os }}-java${{ env.JAVA_VERSION }}-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            maven-${{ runner.os }}-java${{ env.JAVA_VERSION }}-
+            maven-${{ runner.os }}-
+
+      - name: Validate Maven project
+        run: mvn validate --no-transfer-progress
+
+  test:
+    name: "Tests — ${{ matrix.browser }}"
+    runs-on: ubuntu-latest
+    needs: setup
+    fail-fast: false
+    strategy:
+      matrix:
+        browser: ["${{ env.BROWSER }}"]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: "maven"
+
+      - name: Restore Maven cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: maven-${{ runner.os }}-java${{ env.JAVA_VERSION }}-${{ hashFiles('**/pom.xml') }}
+
+      - name: Setup Chrome (if needed)
+        if: matrix.browser == 'chrome'
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Setup Firefox (if needed)
+        if: matrix.browser == 'firefox'
+        uses: browser-actions/setup-firefox@v1
+
+      - name: Run Selenium tests via Maven
+        run: |
+          mvn test \
+            -Dbrowser=${{ matrix.browser }} \
+            -Dheadless=true \
+            -DsuiteXmlFile=${{ env.TEST_SUITE }} \
+            --no-transfer-progress
+        env:
+          BASE_URL: ${{ secrets.BASE_URL || 'http://localhost:8080' }}
+
+      - name: Upload Surefire reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports-${{ matrix.browser }}
+          path: target/surefire-reports/
+          retention-days: 7
+
+      - name: Upload screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: selenium-screenshots-${{ matrix.browser }}
+          path: target/screenshots/
+          retention-days: 7
+
+  report:
+    name: "Report — Summary"
+    runs-on: ubuntu-latest
+    needs: test
+    if: always()
+    steps:
+      - name: Generate summary
+        run: |
+          echo "## 🌐 Selenium Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Java version | ${{ env.JAVA_VERSION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Browser | ${{ env.BROWSER }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Suite | ${{ env.TEST_SUITE }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | ${{ needs.test.result }} |" >> $GITHUB_STEP_SUMMARY

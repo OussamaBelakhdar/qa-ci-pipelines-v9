@@ -1,0 +1,175 @@
+name: "Example — Selenium + Karate (Maven)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Copy this file to your project's .github/workflows/ directory.
+# Adjust the inputs below to match your project structure.
+# ─────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        default: "staging"
+        type: choice
+        options: [staging, production]
+      java-version:
+        description: "Java version"
+        default: "17"
+        type: choice
+        options: ["17", "21"]
+
+env:
+  JAVA_VERSION: ${{ inputs.java-version || '17' }}
+  MAVEN_OPTS: "-Xmx1g -XX:+TieredCompilation"
+
+jobs:
+  # ── LAYER 1: Setup ──────────────────────────────────────────────────────────
+  setup:
+    name: "⚙️ Setup — Java ${{ env.JAVA_VERSION }}"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+
+      - name: Cache Maven dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: maven-${{ runner.os }}-java${{ env.JAVA_VERSION }}-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            maven-${{ runner.os }}-java${{ env.JAVA_VERSION }}-
+
+      - name: Verify Maven
+        run: mvn --version
+
+  # ── LAYER 2: Test ───────────────────────────────────────────────────────────
+  test:
+    name: "🧪 Tests — Selenium + Karate"
+    runs-on: ubuntu-latest
+    needs: setup
+    strategy:
+      matrix:
+        browser: [chrome, firefox]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+
+      - name: Restore Maven cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: maven-${{ runner.os }}-java${{ env.JAVA_VERSION }}-${{ hashFiles('**/pom.xml') }}
+
+      - name: Install Chrome / Firefox
+        run: |
+          if [ "${{ matrix.browser }}" = "chrome" ]; then
+            sudo apt-get install -y google-chrome-stable
+          else
+            sudo apt-get install -y firefox
+          fi
+
+      - name: Run Selenium tests — ${{ matrix.browser }}
+        run: |
+          mvn test -Dbrowser=${{ matrix.browser }} \
+                   -Denvironment=${{ inputs.environment || 'staging' }} \
+                   -Dtest=*IT \
+                   -Dsurefire.failIfNoSpecifiedTests=false
+        env:
+          BASE_URL: ${{ secrets.BASE_URL }}
+
+      - name: Run Karate API tests
+        run: |
+          mvn test -Dtest=KarateRunner \
+                   -Dkarate.options="--tags @regression"
+        env:
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+
+      - name: Upload Surefire reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports-${{ matrix.browser }}
+          path: target/surefire-reports/
+          retention-days: 7
+
+      - name: Upload Karate reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: karate-reports-${{ matrix.browser }}
+          path: target/karate-reports/
+          retention-days: 7
+
+  # ── LAYER 3: Report ─────────────────────────────────────────────────────────
+  report:
+    name: "📊 Report — Merge results"
+    runs-on: ubuntu-latest
+    needs: test
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Surefire reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: surefire-reports-*
+          merge-multiple: true
+          path: all-reports
+
+      - name: Parse JUnit XML → qa-metrics/metrics.json
+        run: |
+          python3 << 'PYEOF'
+          import xml.etree.ElementTree as ET, json, os, glob
+
+          total = passed = failed = skipped = 0
+          for f in glob.glob('all-reports/TEST-*.xml'):
+              try:
+                  root = ET.parse(f).getroot()
+                  total   += int(root.get('tests', 0))
+                  failed  += int(root.get('failures', 0)) + int(root.get('errors', 0))
+                  skipped += int(root.get('skipped', 0))
+              except Exception as e:
+                  print(f"Warning: {f}: {e}")
+
+          passed = total - failed - skipped
+          rate = round(passed / total * 100, 2) if total > 0 else 0.0
+
+          os.makedirs('qa-metrics', exist_ok=True)
+          json.dump({
+              'tool': 'selenium-karate', 'total': total,
+              'passed': passed, 'failed': failed,
+              'skipped': skipped, 'flaky_count': 0, 'pass_rate': rate
+          }, open('qa-metrics/metrics.json', 'w'), indent=2)
+          print(f"Total={total} | Passed={passed} | Failed={failed} | Rate={rate}%")
+          PYEOF
+
+      - name: Upload qa-metrics
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-metrics
+          path: qa-metrics/metrics.json
+
+  # ── LAYER 4: Quality Gate ───────────────────────────────────────────────────
+  quality-gate:
+    name: "🚦 Quality Gate"
+    needs: report
+    uses: your-org/qa-ci-pipelines/.github/workflows/shared/quality-gate.yml@main
+    with:
+      min-pass-rate: "95"
+      max-flaky-count: "3"
+      block-on-failure: "true"

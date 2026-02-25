@@ -1,0 +1,321 @@
+name: "Shared — Notifications (Slack + Teams)"
+
+# Reusable workflow: send rich notifications to Slack and/or Microsoft Teams.
+#
+# Supports:
+#   - Slack (via Incoming Webhook)
+#   - Microsoft Teams (via Power Automate Webhook or Legacy Connector)
+#
+# Usage:
+#
+#   jobs:
+#     notify:
+#       needs: [test, gate]
+#       if: always()
+#       uses: your-org/qa-ci-pipelines/.github/workflows/templates/shared/notify.yml@main
+#       with:
+#         status: ${{ needs.test.result }}
+#         tool: cypress
+#         environment: staging
+#         pass-rate: '96.5'
+#         test-total: '120'
+#         test-failed: '4'
+#         report-url: 'https://your-org.github.io/project/reports/42'
+#         notify-slack: 'true'
+#         notify-teams: 'true'
+#       secrets:
+#         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+#         TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+
+on:
+  workflow_call:
+    inputs:
+      # ── Pipeline context ──────────────────────────────────────────────────────
+      status:
+        description: "Pipeline status: success, failure, cancelled"
+        required: true
+        type: string
+      tool:
+        description: "Tool that ran the tests (e.g. cypress, playwright, k6)"
+        required: false
+        default: "QA"
+        type: string
+      environment:
+        description: "Target environment tested (e.g. staging, production)"
+        required: false
+        default: "staging"
+        type: string
+      # ── Test metrics ──────────────────────────────────────────────────────────
+      pass-rate:
+        description: "Pass rate % (e.g. 96.5)"
+        required: false
+        default: ""
+        type: string
+      test-total:
+        description: "Total number of tests run"
+        required: false
+        default: ""
+        type: string
+      test-failed:
+        description: "Number of failed tests"
+        required: false
+        default: ""
+        type: string
+      report-url:
+        description: "Link to full Allure or HTML report"
+        required: false
+        default: ""
+        type: string
+      # ── Destinations ─────────────────────────────────────────────────────────
+      notify-slack:
+        description: "Send notification to Slack"
+        required: false
+        default: "true"
+        type: string
+      notify-teams:
+        description: "Send notification to Microsoft Teams"
+        required: false
+        default: "false"
+        type: string
+      # ── Behavior ─────────────────────────────────────────────────────────────
+      notify-on:
+        description: "When to notify: always | failure-only | success-only"
+        required: false
+        default: "always"
+        type: string
+      mention-on-failure:
+        description: "Slack user/group to mention on failure (e.g. @qa-team or @here)"
+        required: false
+        default: ""
+        type: string
+    secrets:
+      SLACK_WEBHOOK_URL:
+        required: false
+      TEAMS_WEBHOOK_URL:
+        required: false
+
+jobs:
+  notify:
+    name: "Notify — ${{ inputs.tool }} / ${{ inputs.status }}"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate notification condition
+        id: should-notify
+        run: |
+          STATUS="${{ inputs.status }}"
+          POLICY="${{ inputs.notify-on }}"
+
+          SEND="false"
+          case "$POLICY" in
+            "always")        SEND="true" ;;
+            "failure-only")  [ "$STATUS" = "failure" ] && SEND="true" ;;
+            "success-only")  [ "$STATUS" = "success" ] && SEND="true" ;;
+          esac
+
+          echo "send=$SEND" >> $GITHUB_OUTPUT
+          echo "Notification policy: $POLICY | Status: $STATUS | Will send: $SEND"
+
+      # ── Build shared message payload ──────────────────────────────────────────
+      - name: Build notification payload
+        if: steps.should-notify.outputs.send == 'true'
+        id: payload
+        run: |
+          STATUS="${{ inputs.status }}"
+          TOOL="${{ inputs.tool }}"
+          ENV="${{ inputs.environment }}"
+          REPO="${{ github.repository }}"
+          BRANCH="${{ github.ref_name }}"
+          RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          COMMIT="${{ github.sha }}"
+          SHORT_COMMIT="${COMMIT:0:7}"
+          ACTOR="${{ github.actor }}"
+
+          # Status emoji and color
+          case "$STATUS" in
+            "success")   EMOJI="✅"; COLOR="#36a64f"; TEAMS_COLOR="Good" ;;
+            "failure")   EMOJI="❌"; COLOR="#d32f2f"; TEAMS_COLOR="Attention" ;;
+            "cancelled") EMOJI="⚠️"; COLOR="#ff9800"; TEAMS_COLOR="Warning" ;;
+            *)           EMOJI="ℹ️"; COLOR="#1976d2"; TEAMS_COLOR="Accent" ;;
+          esac
+
+          echo "emoji=$EMOJI" >> $GITHUB_OUTPUT
+          echo "color=$COLOR" >> $GITHUB_OUTPUT
+          echo "teams_color=$TEAMS_COLOR" >> $GITHUB_OUTPUT
+          echo "run_url=$RUN_URL" >> $GITHUB_OUTPUT
+          echo "short_commit=$SHORT_COMMIT" >> $GITHUB_OUTPUT
+
+      # ── SLACK ─────────────────────────────────────────────────────────────────
+      - name: Send Slack notification
+        if: |
+          steps.should-notify.outputs.send == 'true' &&
+          inputs.notify-slack == 'true' &&
+          env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          STATUS="${{ inputs.status }}"
+          EMOJI="${{ steps.payload.outputs.emoji }}"
+          COLOR="${{ steps.payload.outputs.color }}"
+          TOOL="${{ inputs.tool }}"
+          ENV="${{ inputs.environment }}"
+          REPO="${{ github.repository }}"
+          BRANCH="${{ github.ref_name }}"
+          RUN_URL="${{ steps.payload.outputs.run_url }}"
+          SHORT_COMMIT="${{ steps.payload.outputs.short_commit }}"
+          ACTOR="${{ github.actor }}"
+
+          # Build metrics fields
+          FIELDS="["
+          FIELDS+='{"type": "mrkdwn", "text": "*Repository*\n'"$REPO"'"}, '
+          FIELDS+='{"type": "mrkdwn", "text": "*Branch*\n'"$BRANCH"' (\`'"$SHORT_COMMIT"'\`)"}, '
+          FIELDS+='{"type": "mrkdwn", "text": "*Environment*\n'"$ENV"'"}, '
+          FIELDS+='{"type": "mrkdwn", "text": "*Triggered by*\n'"$ACTOR"'"}'
+
+          if [ -n "${{ inputs.pass-rate }}" ]; then
+            FIELDS+='{"type": "mrkdwn", "text": "*Pass rate*\n${{ inputs.pass-rate }}%"}, '
+          fi
+          if [ -n "${{ inputs.test-total }}" ]; then
+            FIELDS+='{"type": "mrkdwn", "text": "*Tests run*\n${{ inputs.test-total }}"}, '
+          fi
+          if [ -n "${{ inputs.test-failed }}" ]; then
+            FIELDS+='{"type": "mrkdwn", "text": "*Failed*\n${{ inputs.test-failed }}"}'
+          fi
+          FIELDS+="]"
+
+          # Build action buttons
+          ACTIONS='[{"type": "button", "text": {"type": "plain_text", "text": "View Run"}, "url": "'"$RUN_URL"'", "style": "primary"}'
+          if [ -n "${{ inputs.report-url }}" ]; then
+            ACTIONS+='{"type": "button", "text": {"type": "plain_text", "text": "Open Report"}, "url": "${{ inputs.report-url }}"}'
+          fi
+          ACTIONS+=']'
+
+          # Mention on failure
+          MENTION=""
+          if [ "$STATUS" = "failure" ] && [ -n "${{ inputs.mention-on-failure }}" ]; then
+            MENTION=" ${{ inputs.mention-on-failure }}"
+          fi
+
+          PAYLOAD=$(cat << EOF
+          {
+            "attachments": [
+              {
+                "color": "$COLOR",
+                "blocks": [
+                  {
+                    "type": "header",
+                    "text": {
+                      "type": "plain_text",
+                      "text": "$EMOJI $TOOL — Pipeline $STATUS$MENTION"
+                    }
+                  },
+                  {
+                    "type": "section",
+                    "fields": $FIELDS
+                  },
+                  {
+                    "type": "actions",
+                    "elements": $ACTIONS
+                  }
+                ]
+              }
+            ]
+          }
+          EOF
+          )
+
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "$SLACK_WEBHOOK_URL")
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Slack notification sent (HTTP $HTTP_CODE)"
+          else
+            echo "⚠️ Slack notification failed (HTTP $HTTP_CODE)"
+          fi
+
+      # ── TEAMS ─────────────────────────────────────────────────────────────────
+      - name: Send Teams notification
+        if: |
+          steps.should-notify.outputs.send == 'true' &&
+          inputs.notify-teams == 'true' &&
+          env.TEAMS_WEBHOOK_URL != ''
+        env:
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+        run: |
+          STATUS="${{ inputs.status }}"
+          EMOJI="${{ steps.payload.outputs.emoji }}"
+          TEAMS_COLOR="${{ steps.payload.outputs.teams_color }}"
+          TOOL="${{ inputs.tool }}"
+          ENV="${{ inputs.environment }}"
+          REPO="${{ github.repository }}"
+          BRANCH="${{ github.ref_name }}"
+          RUN_URL="${{ steps.payload.outputs.run_url }}"
+          SHORT_COMMIT="${{ steps.payload.outputs.short_commit }}"
+          ACTOR="${{ github.actor }}"
+
+          # Build facts (key-value rows)
+          FACTS="["
+          FACTS+='{"name": "Repository", "value": "'"$REPO"'"}, '
+          FACTS+='{"name": "Branch", "value": "'"$BRANCH"' ('"$SHORT_COMMIT"')"}, '
+          FACTS+='{"name": "Environment", "value": "'"$ENV"'"}, '
+          FACTS+='{"name": "Triggered by", "value": "'"$ACTOR"'"}'
+          if [ -n "${{ inputs.pass-rate }}" ]; then
+            FACTS+=', {"name": "Pass rate", "value": "${{ inputs.pass-rate }}%"}'
+          fi
+          if [ -n "${{ inputs.test-total }}" ]; then
+            FACTS+=', {"name": "Tests run", "value": "${{ inputs.test-total }}"}'
+          fi
+          if [ -n "${{ inputs.test-failed }}" ]; then
+            FACTS+=', {"name": "Failed", "value": "${{ inputs.test-failed }}"}'
+          fi
+          FACTS+="]"
+
+          # Build potential actions
+          ACTIONS='[{"@type": "OpenUri", "name": "View Run", "targets": [{"os": "default", "uri": "'"$RUN_URL"'"}]}'
+          if [ -n "${{ inputs.report-url }}" ]; then
+            ACTIONS+='{"@type": "OpenUri", "name": "Open Report", "targets": [{"os": "default", "uri": "${{ inputs.report-url }}"}]}'
+          fi
+          ACTIONS+=']'
+
+          PAYLOAD=$(cat << EOF
+          {
+            "@type": "MessageCard",
+            "@context": "https://schema.org/extensions",
+            "themeColor": "${{ steps.payload.outputs.color }}",
+            "summary": "$TOOL pipeline $STATUS",
+            "sections": [
+              {
+                "activityTitle": "$EMOJI $TOOL — Pipeline $STATUS",
+                "activitySubtitle": "$REPO · $BRANCH",
+                "activityImage": "https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png",
+                "facts": $FACTS,
+                "markdown": true
+              }
+            ],
+            "potentialAction": $ACTIONS
+          }
+          EOF
+          )
+
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "$TEAMS_WEBHOOK_URL")
+
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "202" ]; then
+            echo "✅ Teams notification sent (HTTP $HTTP_CODE)"
+          else
+            echo "⚠️ Teams notification failed (HTTP $HTTP_CODE)"
+          fi
+
+      - name: Notification summary
+        if: always()
+        run: |
+          echo "## 📣 Notifications" >> $GITHUB_STEP_SUMMARY
+          echo "| Channel | Enabled | Condition | Sent |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|---------|-----------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Slack | ${{ inputs.notify-slack }} | ${{ inputs.notify-on }} | ${{ steps.should-notify.outputs.send }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Teams | ${{ inputs.notify-teams }} | ${{ inputs.notify-on }} | ${{ steps.should-notify.outputs.send }} |" >> $GITHUB_STEP_SUMMARY

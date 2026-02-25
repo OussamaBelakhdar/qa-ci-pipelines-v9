@@ -1,0 +1,110 @@
+name: "UI Mobile — Appium + Android"
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      api-level:
+        description: "Android API level"
+        required: false
+        default: "31"
+        type: choice
+        options: ["29", "30", "31", "33"]
+      device:
+        description: "AVD device type"
+        required: false
+        default: "pixel_5"
+      test-suite:
+        description: "Test suite"
+        required: false
+        default: "testng-android.xml"
+
+env:
+  JAVA_VERSION: "17"
+  NODE_VERSION: "20"
+  API_LEVEL: ${{ inputs.api-level || '31' }}
+  DEVICE: ${{ inputs.device || 'pixel_5' }}
+  TEST_SUITE: ${{ inputs.test-suite || 'testng-android.xml' }}
+
+jobs:
+  android-test:
+    name: "Android — API ${{ inputs.api-level || '31' }} / ${{ inputs.device || 'pixel_5' }}"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: "maven"
+
+      - name: Setup Node.js (for Appium server)
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Appium
+        run: |
+          npm install -g appium@latest
+          appium driver install uiautomator2
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Cache AVD
+        uses: actions/cache@v4
+        id: avd-cache
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-${{ env.API_LEVEL }}-${{ env.DEVICE }}
+
+      - name: Create AVD and run emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ env.API_LEVEL }}
+          target: google_apis
+          arch: x86_64
+          profile: ${{ env.DEVICE }}
+          force-avd-creation: false
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: |
+            adb devices
+            # Start Appium server
+            appium --address 127.0.0.1 --port 4723 --relaxed-security &
+            sleep 5
+            # Run tests
+            mvn test \
+              -DsuiteXmlFile=${{ env.TEST_SUITE }} \
+              -Dplatform=android \
+              -DapiLevel=${{ env.API_LEVEL }} \
+              --no-transfer-progress
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-results-api${{ env.API_LEVEL }}
+          path: |
+            target/surefire-reports/
+            target/screenshots/
+          retention-days: 7
+
+      - name: Generate summary
+        if: always()
+        run: |
+          echo "## 📱 Android Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "| API Level | Device | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|--------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| ${{ env.API_LEVEL }} | ${{ env.DEVICE }} | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY

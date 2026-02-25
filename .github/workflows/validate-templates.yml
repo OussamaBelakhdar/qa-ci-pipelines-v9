@@ -1,0 +1,185 @@
+name: "Internal — Validate Templates"
+
+on:
+  push:
+    paths:
+      - "templates/**"
+      - "examples/**"
+      - ".github/workflows/**"
+  pull_request:
+    paths:
+      - "templates/**"
+      - "examples/**"
+  workflow_dispatch:
+
+jobs:
+  validate-yaml:
+    name: "Validate YAML Syntax"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install yamllint
+      - name: Validate templates
+        run: yamllint -d "{extends: relaxed, rules: {line-length: {max: 200}}}" templates/
+      - name: Validate examples
+        run: find examples/ -name "*.yml" -exec yamllint -d relaxed {} +
+
+  lint-workflows:
+    name: "Lint GitHub Actions"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install actionlint
+        run: |
+          # Install official actionlint binary (rhysd/actionlint)
+          # Pinned version — update manually when needed
+          VERSION="1.7.4"
+          curl -sL "https://github.com/rhysd/actionlint/releases/download/v${VERSION}/actionlint_${VERSION}_linux_amd64.tar.gz" \
+            | tar xz actionlint
+          sudo mv actionlint /usr/local/bin/actionlint
+          actionlint --version
+
+      - name: Run actionlint
+        run: |
+          # Lint all workflow files — ignore SC2086 (quoting) as GHA expressions
+          # are safe inside double-quotes in this context
+          actionlint -color .github/workflows/*.yml .github/workflows/shared/*.yml
+
+  check-template-structure:
+    name: "Check Template Convention"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify required files
+        run: |
+          REQUIRED=(
+            "templates/ui-web/cypress.yml"
+            "templates/ui-web/playwright.yml"
+            "templates/ui-web/selenium-java.yml"
+            "templates/ui-mobile/appium-android.yml"
+            "templates/ui-mobile/appium-ios.yml"
+            "templates/api/postman-newman.yml"
+            "templates/api/karate-maven.yml"
+            "templates/api/rest-assured.yml"
+            "templates/performance/jmeter.yml"
+            "templates/performance/k6.yml"
+            "templates/shared/node-cache.yml"
+            "templates/shared/maven-cache.yml"
+            "templates/shared/python-cache.yml"
+            "templates/shared/upload-artifacts.yml"
+            "templates/shared/parallel-matrix.yml"
+            "templates/shared/allure-report.yml"
+            "templates/shared/quality-gate.yml"
+            "templates/shared/notify.yml"
+            "templates/shared/docker-runner.yml"
+          )
+          MISSING=0
+          for t in "${REQUIRED[@]}"; do
+            [ ! -f "$t" ] && echo "❌ Missing: $t" && MISSING=$((MISSING+1)) || echo "✅ $t"
+          done
+          [ "$MISSING" -gt 0 ] && exit 1
+          echo "All 19 required templates present"
+
+      - name: Check shared modules have workflow_call trigger
+        run: |
+          python3 << 'PYEOF'
+          import yaml, os, sys
+
+          errors = []
+          checked = 0
+
+          # Check ACTIVE shared modules in .github/workflows/shared/ (the real ones)
+          active_dir = '.github/workflows/shared'
+          for f in sorted(os.listdir(active_dir)):
+              if not f.endswith('.yml'):
+                  continue
+              path = f'{active_dir}/{f}'
+              doc = yaml.safe_load(open(path))
+              triggers = doc.get('on', {}) if isinstance(doc, dict) else {}
+              if 'workflow_call' not in triggers:
+                  errors.append(f'{path}: missing workflow_call trigger')
+              else:
+                  print(f'✅ {path}: has workflow_call')
+              checked += 1
+
+          # Also check documentation copies in templates/shared/ for consistency
+          doc_dir = 'templates/shared'
+          for f in sorted(os.listdir(doc_dir)):
+              if not f.endswith('.yml'):
+                  continue
+              path = f'{doc_dir}/{f}'
+              doc = yaml.safe_load(open(path))
+              triggers = doc.get('on', {}) if isinstance(doc, dict) else {}
+              # templates/shared also contains non-reusable helpers (node-cache, etc.)
+              # Only flag if it has workflow_call in one copy but not the other
+              has_wf_call = 'workflow_call' in triggers
+              if has_wf_call:
+                  print(f'✅ {path}: has workflow_call (doc copy)')
+              checked += 1
+
+          print(f'Checked {checked} shared module files')
+          if errors:
+              [print(f'❌ {e}') for e in errors]
+              sys.exit(1)
+          PYEOF
+
+      - name: Check v2 templates have quality-gate job
+        run: |
+          python3 -c "
+          import yaml, os, sys
+          V2_TEMPLATES = [
+              'templates/ui-web/cypress.yml',
+              'templates/ui-web/playwright.yml',
+              'templates/api/postman-newman.yml',
+              'templates/performance/k6.yml',
+          ]
+          errors = []
+          for path in V2_TEMPLATES:
+              doc = yaml.safe_load(open(path))
+              jobs = doc.get('jobs', {}) if isinstance(doc, dict) else {}
+              for required in ['test', 'report', 'quality-gate', 'notify']:
+                  if required not in jobs:
+                      errors.append(f'{path}: missing job [{required}]')
+                  else:
+                      print(f'✅ {path}: [{required}]')
+          if errors:
+              [print(f'❌ {e}') for e in errors]
+              sys.exit(1)
+          "
+
+  generate-summary:
+    name: "Summary Report"
+    runs-on: ubuntu-latest
+    needs: [validate-yaml, lint-workflows, check-template-structure]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+      - name: Count templates
+        run: |
+          TOTAL=$(find templates/ -name "*.yml" | wc -l)
+          UI_WEB=$(find templates/ui-web/ -name "*.yml" 2>/dev/null | wc -l)
+          UI_MOB=$(find templates/ui-mobile/ -name "*.yml" 2>/dev/null | wc -l)
+          API=$(find templates/api/ -name "*.yml" 2>/dev/null | wc -l)
+          PERF=$(find templates/performance/ -name "*.yml" 2>/dev/null | wc -l)
+          SHARED=$(find templates/shared/ -name "*.yml" 2>/dev/null | wc -l)
+
+          echo "## 🏗️ QA CI Pipelines — Validation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Domain | Templates |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-----------|" >> $GITHUB_STEP_SUMMARY
+          echo "| UI Web | $UI_WEB |" >> $GITHUB_STEP_SUMMARY
+          echo "| UI Mobile | $UI_MOB |" >> $GITHUB_STEP_SUMMARY
+          echo "| API | $API |" >> $GITHUB_STEP_SUMMARY
+          echo "| Performance | $PERF |" >> $GITHUB_STEP_SUMMARY
+          echo "| Shared | $SHARED |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Total** | **$TOTAL** |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Check | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| YAML validation | ${{ needs.validate-yaml.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Workflow lint | ${{ needs.lint-workflows.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Structure check | ${{ needs.check-template-structure.result }} |" >> $GITHUB_STEP_SUMMARY

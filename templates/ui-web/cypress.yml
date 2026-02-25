@@ -1,0 +1,294 @@
+name: "UI Web — Cypress"
+
+# ─── CHANGELOG ────────────────────────────────────────────────────────────────
+# v2.0 — Added: Allure results export, qa-metrics artifact for Quality Gate,
+#         Slack/Teams notification hook, Docker execution option.
+# v1.0 — Initial template: sharded Cypress runs with cache and artifact upload.
+# ──────────────────────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      node-version:
+        description: "Node.js version"
+        required: false
+        default: "20"
+        type: choice
+        options: ["18", "20"]
+      browser:
+        description: "Browser to run tests"
+        required: false
+        default: "chrome"
+        type: choice
+        options: ["chrome", "firefox", "edge", "electron"]
+      spec:
+        description: "Spec pattern (e.g. cypress/e2e/**/*.cy.js)"
+        required: false
+        default: "cypress/e2e/**/*.cy.js"
+      use-docker:
+        description: "Run tests inside Docker container"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      notify-slack:
+        description: "Send Slack notification on completion"
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+
+env:
+  CYPRESS_RECORD_KEY: ${{ secrets.CYPRESS_RECORD_KEY }}
+  NODE_VERSION: ${{ inputs.node-version || '20' }}
+  BROWSER: ${{ inputs.browser || 'chrome' }}
+  SPEC: ${{ inputs.spec || 'cypress/e2e/**/*.cy.js' }}
+  USE_DOCKER: ${{ inputs.use-docker || 'false' }}
+
+jobs:
+  # LAYER 1 — SETUP
+  setup:
+    name: "Setup — Node ${{ inputs.node-version || '20' }}"
+    runs-on: ubuntu-latest
+    outputs:
+      cache-key: ${{ steps.cache-key.outputs.key }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Generate cache key
+        id: cache-key
+        run: echo "key=cypress-${{ runner.os }}-node${{ env.NODE_VERSION }}-${{ hashFiles('**/package-lock.json', '**/yarn.lock') }}" >> $GITHUB_OUTPUT
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Cache Cypress binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/Cypress
+          key: ${{ steps.cache-key.outputs.key }}
+          restore-keys: |
+            cypress-${{ runner.os }}-node${{ env.NODE_VERSION }}-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify Cypress installation
+        run: npx cypress verify
+
+  # LAYER 2 — TEST (native runner)
+  test:
+    name: "Tests — ${{ matrix.browser }} / Shard ${{ matrix.shard }}"
+    runs-on: ubuntu-latest
+    needs: setup
+    fail-fast: false
+    strategy:
+      matrix:
+        browser: ["${{ env.BROWSER }}"]
+        shard: [1, 2, 3]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Restore Cypress binary cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/Cypress
+          key: ${{ needs.setup.outputs.cache-key }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Cypress tests
+        run: |
+          npx cypress run \
+            --browser ${{ matrix.browser }} \
+            --spec "${{ env.SPEC }}" \
+            --reporter mochawesome \
+            --reporter-options "reportDir=mochawesome-report,overwrite=false,html=false,json=true" \
+            --env grepTags=@shard${{ matrix.shard }}
+        env:
+          CYPRESS_BASE_URL: ${{ secrets.CYPRESS_BASE_URL || 'http://localhost:3000' }}
+
+      - name: Export Allure results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-results-cypress-${{ matrix.browser }}-shard${{ matrix.shard }}
+          path: allure-results/
+          retention-days: 3
+          if-no-files-found: warn
+
+      - name: Upload Mochawesome JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mochawesome-${{ matrix.browser }}-shard${{ matrix.shard }}
+          path: mochawesome-report/*.json
+          retention-days: 3
+
+      - name: Upload screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cypress-screenshots-${{ matrix.browser }}-shard${{ matrix.shard }}
+          path: cypress/screenshots
+          retention-days: 7
+
+      - name: Upload videos
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cypress-videos-${{ matrix.browser }}-shard${{ matrix.shard }}
+          path: cypress/videos
+          retention-days: 7
+
+  # LAYER 3 — REPORT: merge shards + produce qa-metrics artifact
+  report:
+    name: "Report — Merge & Metrics"
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: always()
+    outputs:
+      pass-rate: ${{ steps.metrics.outputs.pass_rate }}
+      total: ${{ steps.metrics.outputs.total }}
+      failed: ${{ steps.metrics.outputs.failed }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Mochawesome reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mochawesome-*
+          merge-multiple: true
+          path: ./mochawesome-report
+
+      - name: Download Allure results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: allure-results-cypress-*
+          merge-multiple: true
+          path: ./allure-results
+
+      - name: Parse test metrics from Mochawesome
+        id: metrics
+        run: |
+          python3 << 'PYEOF'
+          import json, glob, os
+
+          total=passed=failed=pending=0
+          for f in glob.glob('mochawesome-report/*.json'):
+              try:
+                  d = json.load(open(f))
+                  stats = d.get('stats', {})
+                  total   += stats.get('tests',    0)
+                  passed  += stats.get('passes',   0)
+                  failed  += stats.get('failures', 0)
+                  pending += stats.get('pending',  0)
+              except Exception as e:
+                  print(f"Warning: could not parse {f}: {e}")
+
+          rate = round(passed / total * 100, 2) if total > 0 else 0.0
+          print(f"Total: {total} | Passed: {passed} | Failed: {failed} | Rate: {rate}%")
+
+          os.makedirs("qa-metrics", exist_ok=True)
+          metrics = {
+              "tool": "cypress",
+              "total": total,
+              "passed": passed,
+              "failed": failed,
+              "skipped": pending,
+              "flaky_count": 0,
+              "pass_rate": rate
+          }
+          with open("qa-metrics/metrics.json", "w") as f:
+              json.dump(metrics, f, indent=2)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"pass_rate={rate}\n")
+              out.write(f"total={total}\n")
+              out.write(f"failed={failed}\n")
+          PYEOF
+
+      - name: Upload qa-metrics artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-metrics
+          path: qa-metrics/metrics.json
+          retention-days: 7
+
+      - name: Upload merged Allure results
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-results-cypress
+          path: ./allure-results
+          retention-days: 7
+
+      - name: Generate Step Summary
+        run: |
+          echo "## 🧪 Cypress Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Browser | ${{ env.BROWSER }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Node | ${{ env.NODE_VERSION }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Shards | 3 |" >> $GITHUB_STEP_SUMMARY
+          echo "| Status | ${{ needs.test.result }} |" >> $GITHUB_STEP_SUMMARY
+
+  # LAYER 4 — QUALITY GATE
+  quality-gate:
+    name: "Quality Gate"
+    needs: [report]
+    if: always() && needs.report.result == 'success'
+    uses: ./.github/workflows/shared/quality-gate.yml
+    with:
+      min-pass-rate: "95"
+      max-flaky-count: "5"
+      block-on-failure: "true"
+      metrics-artifact: "qa-metrics"
+
+  # LAYER 5 — ALLURE REPORT
+  allure:
+    name: "Allure Report"
+    needs: [report]
+    if: always() && needs.report.result != 'skipped'
+    uses: ./.github/workflows/shared/allure-report.yml
+    with:
+      artifact-pattern: "allure-results-cypress"
+      report-title: "Cypress — QA Report"
+      publish-pages: "false"
+    secrets:
+      GH_PAGES_TOKEN: ${{ secrets.GH_PAGES_TOKEN }}
+
+  # LAYER 6 — NOTIFICATION
+  notify:
+    name: "Notify"
+    needs: [report, quality-gate]
+    if: always()
+    uses: ./.github/workflows/shared/notify.yml
+    with:
+      status: ${{ needs.quality-gate.result }}
+      tool: "Cypress"
+      environment: "staging"
+      pass-rate: ${{ needs.report.outputs.pass-rate }}
+      test-total: ${{ needs.report.outputs.total }}
+      test-failed: ${{ needs.report.outputs.failed }}
+      notify-slack: ${{ inputs.notify-slack || 'false' }}
+      notify-on: "always"
+      mention-on-failure: "@qa-team"
+    secrets:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}

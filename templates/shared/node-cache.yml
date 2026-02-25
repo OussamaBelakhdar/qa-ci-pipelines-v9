@@ -1,0 +1,77 @@
+name: "Shared — Node Cache"
+
+# Reusable workflow for Node.js dependency caching
+# Usage:
+#   jobs:
+#     setup:
+#       uses: your-org/qa-ci-pipelines/.github/workflows/templates/shared/node-cache.yml@main
+#       with:
+#         node-version: '20'
+#         working-directory: '.'
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: "Node.js version"
+        required: false
+        default: "20"
+        type: string
+      working-directory:
+        description: "Working directory"
+        required: false
+        default: "."
+        type: string
+      package-manager:
+        description: "Package manager (npm or yarn)"
+        required: false
+        default: "npm"
+        type: string
+    outputs:
+      cache-hit:
+        description: "Whether the cache was restored"
+        value: ${{ jobs.cache-node.outputs.cache-hit }}
+      node-version:
+        description: "Node.js version used"
+        value: ${{ jobs.cache-node.outputs.node-version }}
+
+jobs:
+  cache-node:
+    name: "Cache Node ${{ inputs.node-version }}"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    outputs:
+      cache-hit: ${{ steps.cache.outputs.cache-hit }}
+      node-version: ${{ inputs.node-version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.package-manager }}
+
+      - name: Restore cache
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ inputs.working-directory }}/node_modules
+            ~/.npm
+          key: node-${{ runner.os }}-${{ inputs.node-version }}-${{ hashFiles('**/package-lock.json', '**/yarn.lock') }}
+          restore-keys: |
+            node-${{ runner.os }}-${{ inputs.node-version }}-
+            node-${{ runner.os }}-
+
+      - name: Install dependencies
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          if [ "${{ inputs.package-manager }}" = "yarn" ]; then
+            yarn install --frozen-lockfile
+          else
+            npm ci
+          fi

@@ -1,0 +1,32 @@
+{
+  "name": "qa-ci-pipelines-demo",
+  "version": "1.0.0",
+  "description": "Live demo — Saucedemo QA Suite using qa-ci-pipelines templates",
+  "private": true,
+  "scripts": {
+    "cy:open": "cypress open",
+    "cy:run": "cypress run --browser chrome",
+    "cy:run:headless": "cypress run --browser chrome --headless",
+    "cy:run:firefox": "cypress run --browser firefox",
+    "pw:test": "playwright test",
+    "pw:test:chromium": "playwright test --project=chromium",
+    "pw:test:firefox": "playwright test --project=firefox",
+    "pw:test:webkit": "playwright test --project=webkit",
+    "pw:ui": "playwright test --ui",
+    "pw:report": "playwright show-report",
+    "type-check": "tsc --noEmit",
+    "lint": "tsc --noEmit && echo '✅ TypeScript OK'"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "cypress": "^13.6.0",
+    "mochawesome": "^7.1.3",
+    "mochawesome-merge": "^4.3.0",
+    "@playwright/test": "^1.41.0",
+    "allure-playwright": "^2.10.0",
+    "typescript": "^5.3.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
