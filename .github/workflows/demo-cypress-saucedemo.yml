@@ -120,7 +120,7 @@ jobs:
           if [ "$SHARD" = "1" ]; then
             SPEC_FLAGS="--spec cypress/e2e/auth/**/*.cy.js"
           elif [ "$SHARD" = "2" ]; then
-            SPEC_FLAGS="--spec cypress/e2e/catalog/**/*.cy.js --spec cypress/e2e/cart/**/*.cy.js"
+            SPEC_FLAGS="--spec cypress/e2e/catalog/**/*.cy.js,cypress/e2e/cart/**/*.cy.js"
           else
             SPEC_FLAGS="--spec cypress/e2e/checkout/**/*.cy.js"
           fi
@@ -142,7 +142,7 @@ jobs:
           FILE="mochawesome-report/shard-${SHARD}.json"
 
           # Check for timestamped variant too
-          FOUND=$(find mochawesome-report -name "shard-${SHARD}*.json" 2>/dev/null | head -1)
+          FOUND=$(find mochawesome-report -type f -name "shard-${SHARD}*.json" 2>/dev/null | head -1)
 
           if [ -n "$FOUND" ]; then
             echo "✅ Found: $FOUND"
@@ -177,6 +177,7 @@ jobs:
           name: mochawesome-shard${{ matrix.shard }}
           path: demo/mochawesome-report/shard-${{ matrix.shard }}.json
           retention-days: 7
+          if-no-files-found: error
 
       - name: Upload screenshots on failure
         if: failure()
