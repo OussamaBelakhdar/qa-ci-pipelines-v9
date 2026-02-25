@@ -213,7 +213,7 @@ jobs:
           import json, glob, os
 
           total = passed = failed = pending = 0
-          for f in glob.glob('mochawesome-report/*.json'):
+          for f in glob.glob('mochawesome-report/**/*.json', recursive=True):
               try:
                   d = json.load(open(f))
                   s = d.get('stats', {})
