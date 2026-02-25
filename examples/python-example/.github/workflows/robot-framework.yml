@@ -43,7 +43,10 @@ jobs:
 
       - name: Compute cache key
         id: cache-key
-        run: echo "key=pip-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${{ hashFiles('requirements.txt') }}" >> $GITHUB_OUTPUT
+        run: |
+          HASH="${{ hashFiles('requirements.txt') }}"
+          echo "key=pip-${{ runner.os }}-py${{ env.PYTHON_VERSION }}-${HASH}" \
+            >> $GITHUB_OUTPUT
 
       - name: Install dependencies
         run: pip install -r requirements.txt
@@ -120,8 +123,9 @@ jobs:
           try:
               tree = ET.parse('results/output.xml')
               root = tree.getroot()
-              # Robot Framework output.xml: <statistics><total><stat name="All Tests">
-              stat = root.find('.//statistics/total/stat[@name="All Tests"]')
+              # output.xml: statistics/total/stat[@name="All Tests"]
+              xpath = './/statistics/total/stat[@name="All Tests"]'
+              stat = root.find(xpath)
               passed  = int(stat.get('pass', 0))
               failed  = int(stat.get('fail', 0))
               skipped = int(stat.get('skip', 0))
@@ -138,7 +142,7 @@ jobs:
               'passed': passed, 'failed': failed,
               'skipped': skipped, 'flaky_count': 0, 'pass_rate': rate
           }, open('qa-metrics/metrics.json', 'w'), indent=2)
-          print(f"Total={total} | Passed={passed} | Failed={failed} | Rate={rate}%")
+          print(f"Total={total}|Passed={passed}|Failed={failed}|Rate={rate}%")
           PYEOF
 
       - name: Upload qa-metrics

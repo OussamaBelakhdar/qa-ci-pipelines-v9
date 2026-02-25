@@ -59,7 +59,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          key: pw-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
       - run: npx playwright install --with-deps ${{ matrix.browser }}
       - run: npx playwright test --project=${{ matrix.browser }}
         env:
@@ -82,7 +82,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install k6
         run: |
-          curl https://github.com/grafana/k6/releases/download/v0.49.0/k6-v0.49.0-linux-amd64.tar.gz -L | tar xvz
+          K6_URL=https://github.com/grafana/k6/releases/download
+          K6_PKG=k6-v0.49.0-linux-amd64.tar.gz
+          curl -L "${K6_URL}/v0.49.0/${K6_PKG}" | tar xvz
           sudo mv k6-v0.49.0-linux-amd64/k6 /usr/local/bin
       - name: Run k6 smoke test
         run: |
@@ -114,6 +116,11 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "| Layer | Job | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|-------|-----|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Layer 1 | API Smoke (Newman) | ${{ needs.api-smoke.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Layer 2 | UI Multi-browser (Playwright) | ${{ needs.ui-tests.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Layer 3 | Performance Gate (k6) | ${{ needs.performance-gate.result }} |" >> $GITHUB_STEP_SUMMARY
+          R1="${{ needs.api-smoke.result }}"
+          R2="${{ needs.ui-tests.result }}"
+          R3="${{ needs.performance-gate.result }}"
+          {
+            echo "| Layer 1 | API Smoke (Newman) | ${R1} |"
+            echo "| Layer 2 | UI Multi-browser (Playwright) | ${R2} |"
+            echo "| Layer 3 | Performance Gate (k6) | ${R3} |"
+          } >> $GITHUB_STEP_SUMMARY
