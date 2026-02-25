@@ -12,13 +12,14 @@ Cypress.Commands.add("login", (username, password) => {
   const user = username || Cypress.env("STANDARD_USER") || "standard_user";
   const pass = password || Cypress.env("PASSWORD") || "secret_sauce";
 
-  cy.session([user, pass], () => {
-    cy.visit("/");
-    cy.get('[data-test="username"]').type(user);
-    cy.get('[data-test="password"]').type(pass);
-    cy.get('[data-test="login-button"]').click();
-    cy.url().should("include", "/inventory.html");
-  });
+  // Direct login — cy.session() is avoided because Cypress divides
+  // pageLoadTimeout across retries (90000ms / 3 attempts = 30000ms each),
+  // causing spurious timeouts against the live saucedemo.com site in CI.
+  cy.visit("/");
+  cy.get('[data-test="username"]').type(user);
+  cy.get('[data-test="password"]').type(pass);
+  cy.get('[data-test="login-button"]').click();
+  cy.url().should("include", "/inventory.html");
 });
 
 /**

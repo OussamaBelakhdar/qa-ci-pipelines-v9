@@ -2,10 +2,10 @@
 // @shard1
 
 describe("Authentication — Login", () => {
-  // No global beforeEach — tests using cy.login() must not call cy.visit("/")
-  // beforehand because cy.session() already navigates to about:blank then calls
-  // cy.visit("/") internally. A double page-load causes pageLoadTimeout errors
-  // in CI against the external saucedemo.com site.
+  // No global beforeEach — tests using cy.login() handle their own navigation
+  // (cy.login() visits "/" and ends at "/inventory.html" after login).
+  // Tests that do NOT call cy.login() visit "/" themselves or via a scoped
+  // beforeEach inside their context block.
 
   context("Valid credentials", () => {
     it("logs in successfully with standard_user", () => {
@@ -24,7 +24,7 @@ describe("Authentication — Login", () => {
 
     it("preserves session across page reloads", () => {
       cy.login();
-      cy.visit("/inventory.html"); // cy.session() leaves browser on about:blank — navigate first
+      cy.visit("/inventory.html"); // cy.login() ends at /inventory.html; explicit visit ensures clean state
       cy.reload();
       cy.url().should("include", "/inventory.html");
       cy.get(".title").should("have.text", "Products");
@@ -32,7 +32,7 @@ describe("Authentication — Login", () => {
 
     it("shows the correct username in the burger menu", () => {
       cy.login();
-      cy.visit("/inventory.html"); // cy.session() leaves browser on about:blank — navigate first
+      cy.visit("/inventory.html"); // cy.login() ends at /inventory.html; explicit visit ensures clean state
       cy.get("#react-burger-menu-btn").click();
       cy.get(".bm-menu").should("be.visible");
     });
