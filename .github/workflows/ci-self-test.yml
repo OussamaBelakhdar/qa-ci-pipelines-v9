@@ -101,7 +101,6 @@ jobs:
   # ── Test 1: gate should PASS with perfect metrics ──────────────────────────
   test-gate-pass:
     name: "✅ Gate should PASS (100% pass rate)"
-    runs-on: ubuntu-latest
     needs: prepare-fixtures
     uses: ./.github/workflows/shared/quality-gate.yml
     with:
@@ -113,9 +112,7 @@ jobs:
   # ── Test 2: gate should FAIL with low pass rate ────────────────────────────
   test-gate-fail-rate:
     name: "❌ Gate should FAIL (80% < 95% threshold)"
-    runs-on: ubuntu-latest
     needs: prepare-fixtures
-    continue-on-error: true   # expected to fail — we verify below
     uses: ./.github/workflows/shared/quality-gate.yml
     with:
       min-pass-rate: "95"
@@ -126,9 +123,7 @@ jobs:
   # ── Test 3: gate should FAIL with too many flaky tests ─────────────────────
   test-gate-fail-flaky:
     name: "❌ Gate should FAIL (10 flaky > 5 threshold)"
-    runs-on: ubuntu-latest
     needs: prepare-fixtures
-    continue-on-error: true   # expected to fail — we verify below
     uses: ./.github/workflows/shared/quality-gate.yml
     with:
       min-pass-rate: "95"
@@ -139,9 +134,7 @@ jobs:
   # ── Test 4: gate should exit cleanly on malformed input ────────────────────
   test-gate-malformed:
     name: "⚠️ Gate should handle malformed input"
-    runs-on: ubuntu-latest
     needs: prepare-fixtures
-    continue-on-error: true   # expected to fail — we verify below
     uses: ./.github/workflows/shared/quality-gate.yml
     with:
       min-pass-rate: "95"
@@ -209,11 +202,13 @@ jobs:
           FAIL_FLAKY="${{ needs.test-gate-fail-flaky.result }}"
           MALFORMED="${{ needs.test-gate-malformed.result }}"
 
-          echo "## 🧪 Quality Gate Self-Test" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Scenario | Expected | Got | ✅/❌ |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|----------|-----|-------|" >> $GITHUB_STEP_SUMMARY
-          echo "| 100% pass rate | success | $PASS | $([ "$PASS" = "success" ] && echo ✅ || echo ❌) |" >> $GITHUB_STEP_SUMMARY
-          echo "| 80% pass rate (below 95%) | failure | $FAIL_RATE | $([ "$FAIL_RATE" = "failure" ] && echo ✅ || echo ❌) |" >> $GITHUB_STEP_SUMMARY
-          echo "| 10 flaky tests (above 5) | failure | $FAIL_FLAKY | $([ "$FAIL_FLAKY" = "failure" ] && echo ✅ || echo ❌) |" >> $GITHUB_STEP_SUMMARY
-          echo "| Malformed metrics.json | failure | $MALFORMED | $([ "$MALFORMED" = "failure" ] && echo ✅ || echo ❌) |" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## 🧪 Quality Gate Self-Test"
+            echo ""
+            echo "| Scenario | Expected | Got | ✅/❌ |"
+            echo "|----------|----------|-----|-------|"
+            echo "| 100% pass rate | success | $PASS | $([ "$PASS" = "success" ] && echo ✅ || echo ❌) |"
+            echo "| 80% pass rate (below 95%) | failure | $FAIL_RATE | $([ "$FAIL_RATE" = "failure" ] && echo ✅ || echo ❌) |"
+            echo "| 10 flaky tests (above 5) | failure | $FAIL_FLAKY | $([ "$FAIL_FLAKY" = "failure" ] && echo ✅ || echo ❌) |"
+            echo "| Malformed metrics.json | failure | $MALFORMED | $([ "$MALFORMED" = "failure" ] && echo ✅ || echo ❌) |"
+          } >> "$GITHUB_STEP_SUMMARY"

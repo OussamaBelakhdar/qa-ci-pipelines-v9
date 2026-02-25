@@ -169,7 +169,7 @@ jobs:
       # ── Publish to GitHub Pages (optional) ───────────────────────────────────
       - name: Deploy to GitHub Pages
         if: inputs.publish-pages == 'true'
-        uses: peaceiris/actions-gh-pages@v3
+        uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GH_PAGES_TOKEN || secrets.GITHUB_TOKEN }}
           publish_dir: allure-report

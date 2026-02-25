@@ -46,9 +46,14 @@ jobs:
 
       - name: Run actionlint
         run: |
-          # Lint all workflow files — ignore SC2086 (quoting) as GHA expressions
-          # are safe inside double-quotes in this context
-          actionlint -color .github/workflows/*.yml .github/workflows/shared/*.yml
+          # Lint all workflow files — ignore shellcheck style/info rules that
+          # are safe in GHA contexts (SC2086: quoting, SC2129: grouped redirects,
+          # SC2034: unused vars that are expanded by GHA expression engine)
+          actionlint -color \
+            -ignore 'SC2086' \
+            -ignore 'SC2129' \
+            -ignore 'SC2034' \
+            .github/workflows/*.yml .github/workflows/shared/*.yml
 
   check-template-structure:
     name: "Check Template Convention"
@@ -93,6 +98,13 @@ jobs:
           errors = []
           checked = 0
 
+          def get_triggers(doc):
+              # PyYAML 5/6 with YAML 1.1 parses the bare key `on:` as boolean True.
+              # Try both the boolean key (YAML 1.1) and the string key (YAML 1.2).
+              if not isinstance(doc, dict):
+                  return {}
+              return doc.get(True, doc.get('on', {})) or {}
+
           # Check ACTIVE shared modules in .github/workflows/shared/ (the real ones)
           active_dir = '.github/workflows/shared'
           for f in sorted(os.listdir(active_dir)):
@@ -100,7 +112,7 @@ jobs:
                   continue
               path = f'{active_dir}/{f}'
               doc = yaml.safe_load(open(path))
-              triggers = doc.get('on', {}) if isinstance(doc, dict) else {}
+              triggers = get_triggers(doc)
               if 'workflow_call' not in triggers:
                   errors.append(f'{path}: missing workflow_call trigger')
               else:
@@ -114,7 +126,7 @@ jobs:
                   continue
               path = f'{doc_dir}/{f}'
               doc = yaml.safe_load(open(path))
-              triggers = doc.get('on', {}) if isinstance(doc, dict) else {}
+              triggers = get_triggers(doc)
               # templates/shared also contains non-reusable helpers (node-cache, etc.)
               # Only flag if it has workflow_call in one copy but not the other
               has_wf_call = 'workflow_call' in triggers

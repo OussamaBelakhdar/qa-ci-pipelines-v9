@@ -65,12 +65,12 @@ jobs:
             grep "iOS ${{ env.IOS_VERSION }}" | \
             head -1 | \
             grep -E '[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}' -o)
-          
+
           if [ -z "$UDID" ]; then
             echo "❌ Simulator not found: ${{ env.DEVICE }} iOS ${{ env.IOS_VERSION }}"
             exit 1
           fi
-          
+
           echo "SIMULATOR_UDID=$UDID" >> $GITHUB_ENV
           xcrun simctl boot "$UDID"
           xcrun simctl bootstatus "$UDID" -b

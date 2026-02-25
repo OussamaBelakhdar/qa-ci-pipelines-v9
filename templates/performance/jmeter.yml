@@ -96,13 +96,13 @@ jobs:
           # Extract key metrics from JTL
           TOTAL=$(grep -c "^[0-9]" results/results.jtl 2>/dev/null || echo "0")
           ERRORS=$(grep -c ",false," results/results.jtl 2>/dev/null || echo "0")
-          
+
           if [ "$TOTAL" -gt "0" ]; then
             ERROR_RATE=$(echo "scale=2; $ERRORS * 100 / $TOTAL" | bc)
             echo "Total requests: $TOTAL"
             echo "Errors: $ERRORS"
             echo "Error rate: $ERROR_RATE%"
-            
+
             # Fail if error rate > 5%
             if (( $(echo "$ERROR_RATE > 5" | bc -l) )); then
               echo "❌ Error rate $ERROR_RATE% exceeds threshold of 5%"

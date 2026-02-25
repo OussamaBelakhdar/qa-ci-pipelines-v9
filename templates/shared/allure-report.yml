@@ -204,7 +204,7 @@ jobs:
           broken  = stats.get('broken', 0)
           skipped = stats.get('skipped', 0)
           rate    = round(passed / total * 100, 1) if total > 0 else 0
-          
+
           print(f'ALLURE_TOTAL={total}')
           print(f'ALLURE_PASSED={passed}')
           print(f'ALLURE_FAILED={failed}')

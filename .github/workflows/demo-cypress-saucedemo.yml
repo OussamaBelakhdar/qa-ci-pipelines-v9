@@ -189,7 +189,7 @@ jobs:
   report:
     name: "📊 Report — Merge & Metrics"
     runs-on: ubuntu-latest
-    needs: test
+    needs: [setup, test]
     if: always()
     outputs:
       pass-rate: ${{ steps.metrics.outputs.pass_rate }}

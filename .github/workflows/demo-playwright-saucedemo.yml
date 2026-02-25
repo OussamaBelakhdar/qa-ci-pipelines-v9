@@ -122,8 +122,8 @@ jobs:
     name: "🧪 Tests — ${{ matrix.browser }}"
     runs-on: ubuntu-latest
     needs: setup
-    fail-fast: false
     strategy:
+      fail-fast: false
       matrix:
         browser: [chromium, firefox, webkit]
     steps:
